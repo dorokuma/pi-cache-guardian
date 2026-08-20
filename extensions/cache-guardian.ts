@@ -8,7 +8,7 @@
  * Install: copy to ~/.pi/agent/extensions/cache-guardian.ts
  */
 
-import type { ExtensionAPI, BuildSystemPromptOptions } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, BuildSystemPromptOptions, SessionManager } from "@earendil-works/pi-coding-agent";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const PI_CACHE_RETENTION_ENV = "PI_CACHE_RETENTION";
@@ -303,7 +303,10 @@ export default function (pi: ExtensionAPI) {
     const hitPct = total > 0 ? Math.round((cr / total) * 100) : 0;
     turnReports.push({ turn: snapshot.turns, input: inp, cacheRead: cr, cacheWrite: cw, hitPct });
     if (cr > 0 || cw > 0 || verbose) {
-      ctx.sessionManager.appendCustomEntry("cache-guard-turn", { turn: snapshot.turns, input: inp, cacheRead: cr, cacheWrite: cw, hitPct });
+      // ExtensionContext only exposes a read-only SessionManager, but at runtime
+      // the handler receives the full SessionManager, which does provide
+      // appendCustomEntry(). Cast to the full type to call it.
+      (ctx.sessionManager as SessionManager).appendCustomEntry("cache-guard-turn", { turn: snapshot.turns, input: inp, cacheRead: cr, cacheWrite: cw, hitPct });
     }
   });
 
