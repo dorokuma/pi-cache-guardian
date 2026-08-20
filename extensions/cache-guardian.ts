@@ -270,13 +270,13 @@ export default function (pi: ExtensionAPI) {
       if (m.api === "openai-completions") {
         if (!promptCacheRetention400.has(mk)) {
           promptCacheRetention400.add(mk);
-          _ctx.ui.notify(`[${LOG}] ${mk} rejected prompt_cache_retention (400). Stripping on future requests.`, "warn");
+          _ctx.ui.notify(`[${LOG}] ${mk} rejected prompt_cache_retention (400). Stripping on future requests.`, "warning");
         }
       }
       if (m.api === "anthropic-messages") {
         if (!anthropicTtl400.has(mk)) {
           anthropicTtl400.add(mk);
-          _ctx.ui.notify(`[${LOG}] ${mk} rejected Anthropic cache_control TTL (400). Downgrading.`, "warn");
+          _ctx.ui.notify(`[${LOG}] ${mk} rejected Anthropic cache_control TTL (400). Downgrading.`, "warning");
         }
       }
     }
