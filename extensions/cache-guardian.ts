@@ -17,6 +17,15 @@ const OPENAI_PROMPT_CACHE_KEY_MAX = 64;
 const SKILL_COMPRESSION_MIN = 4;
 const MIN_STABLE_LEN = 8;
 const LOG = "cache-guard";
+const PI_CACHE_GUARD_FOOTER_ENV = "PI_CACHE_GUARD_FOOTER";
+
+// ── Custom footer ────────────────────────────────────────────────────
+// Unified geometric icon set (user requirement: one symbol family, no emoji+mixin).
+const FOOTER_ICON = { sheep: "●", hit: "◆", context: "▲", model: "■" };
+let footerTui: any = null;
+let footerModelName = "";
+let footerThinking: string | undefined;
+let footerContext: { tokens: number | null; contextWindow: number; percent: number | null } | null = null;
 
 // ── Runtime state (module-level) ─────────────────────────────────────────────
 // Set PI_CACHE_RETENTION=long at startup (captured so /cache-guardian disable
@@ -54,6 +63,62 @@ function esc(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/'/g, "&apos;");
 }
 function modelKey(m: any): string { return m ? `${m.provider}/${m.id}` : "unknown"; }
+
+// ── Custom footer helpers ────────────────────────────────────────────
+/** Compact token window: "1.0M" / "800K" / raw. */
+function formatWindow(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${Math.round(n / 1_000)}K`;
+  return String(n);
+}
+/** Strip the leading "◆ Shepherd · " marker from the shepherd extension status. */
+function sheepMeat(s: string): string {
+  return s.replace(/^\s*[◆●▲■]?\s*(?:Shepherd\s*[·•|｜]\s*)?/i, "").trim();
+}
+/** Snapshot current model / thinking / context usage into footer state. */
+function readFooterCtx(ctx: any) {
+  footerModelName = ctx?.model?.name ?? "";
+  footerThinking = ctx?.thinkingLevel;
+  const cu = ctx?.getContextUsage ? ctx.getContextUsage() : undefined;
+  footerContext = cu ? { tokens: cu.tokens, contextWindow: cu.contextWindow, percent: cu.percent } : null;
+}
+function refreshFooter() {
+  footerTui?.requestRender?.(true);
+}
+/** Register the custom footer. Pass ctx having a live UI for the mode guard. */
+function installFooter(ui: any) {
+  ui.setFooter((tui: any, theme: any, footerData: any) => {
+    footerTui = tui;
+    return {
+      render(_width: number): string[] {
+        const parts: string[] = [];
+        // 1. shepherd status (only if set) — icon ●
+        const sheep = footerData.getExtensionStatuses().get("shepherd");
+        if (sheep) parts.push(`${theme.fg("dim", FOOTER_ICON.sheep)} ${theme.fg("text", sheepMeat(sheep))}`);
+        // 2. cache hit rate (session cumulative) — icon ◆
+        const total = snapshot.totalCacheRead + snapshot.totalInput;
+        const hit = total > 0 ? Math.round((snapshot.totalCacheRead / total) * 100) : null;
+        const hitStr = hit === null ? theme.fg("dim", "n/a") : theme.fg("text", `${hit}%`);
+        parts.push(`${theme.fg("dim", FOOTER_ICON.hit)} ${hitStr}`);
+        // 3. context usage — icon ▲
+        const cu = footerContext;
+        const ctxStr = cu && cu.percent !== null
+          ? theme.fg("text", `${Math.round(cu.percent)}%/${formatWindow(cu.contextWindow)}`)
+          : theme.fg("dim", "n/a");
+        parts.push(`${theme.fg("dim", FOOTER_ICON.context)} ${ctxStr}`);
+        // 4. model name + thinking level — icon ■
+        if (footerModelName) {
+          let m: string = footerModelName;
+          if (footerThinking) m += ` · ${footerThinking}`;
+          parts.push(`${theme.fg("dim", FOOTER_ICON.model)} ${theme.fg("text", m)}`);
+        }
+        return [parts.join(theme.fg("dim", " | "))];
+      },
+      invalidate() {},
+      dispose() { footerTui = null; },
+    };
+  });
+}
 
 // ── Prompt optimisation ──────────────────────────────────────────────────────
 function isStableFile(p: string): boolean {
@@ -187,6 +252,10 @@ export default function (pi: ExtensionAPI) {
   const noPromptRewrite = isEnabled(process.env.PI_CACHE_GUARD_NO_PROMPT_REWRITE);
   const stripRetention = isEnabled(process.env.PI_CACHE_GUARD_STRIP_RETENTION);
 
+  // ── 0. Custom footer: install at session start (default on, off via PI_CACHE_GUARD_FOOTER=0) ──
+  const rawFooter = process.env[PI_CACHE_GUARD_FOOTER_ENV];
+  const footerOn = rawFooter === undefined || isEnabled(rawFooter);
+
   // ── 1. before_agent_start: reorder + compress + strip + freeze ──
   pi.on("before_agent_start", async (event, ctx) => {
     if (!runtimeEnabled) return;
@@ -308,6 +377,9 @@ export default function (pi: ExtensionAPI) {
       // appendCustomEntry(). Cast to the full type to call it.
       (ctx.sessionManager as SessionManager).appendCustomEntry("cache-guard-turn", { turn: snapshot.turns, input: inp, cacheRead: cr, cacheWrite: cw, hitPct });
     }
+    // Footer: refresh cache-hit + context after each agent turn.
+    readFooterCtx(ctx);
+    refreshFooter();
   });
 
   // ── 5. session_shutdown: cache guard ──
@@ -320,11 +392,25 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  // ── 6. session_start: reset state ──
-  pi.on("session_start", () => {
+  // ── 6. session_start: reset state + (re)install footer when TUI active ──
+  pi.on("session_start", (event, ctx) => {
     goldenSystemPrompt = null;
     snapshot = { totalCacheRead: 0, totalCacheWrite: 0, totalInput: 0, turns: 0 };
     turnReports = [];
+    readFooterCtx(ctx);
+    if (footerOn && ctx.mode === "tui") {
+      installFooter(ctx.ui);
+    }
+  });
+
+  // ── 6b. footer refresh triggers: model / thinking changes re-render footer ──
+  pi.on("model_select", (_event, ctx) => {
+    readFooterCtx(ctx);
+    refreshFooter();
+  });
+  pi.on("thinking_level_select", (_event, ctx) => {
+    footerThinking = ctx.thinkingLevel;
+    refreshFooter();
   });
 
   // ── 7. /cache-guardian command ──
@@ -338,11 +424,14 @@ export default function (pi: ExtensionAPI) {
         runtimeEnabled = false; goldenSystemPrompt = null;
         if (RETENTION_BASELINE.wasSet) process.env[PI_CACHE_RETENTION_ENV] = RETENTION_BASELINE.value;
         else delete process.env[PI_CACHE_RETENTION_ENV];
+        ctx.ui.setFooter(undefined); // restore native footer
         ctx.ui.notify(`[${LOG}] Disabled for this process. Run /reload to re-enable.`, "info");
         return;
       }
       if (cmd === "enable") {
         runtimeEnabled = true; process.env[PI_CACHE_RETENTION_ENV] = LONG_CACHE_RETENTION_VALUE;
+        ctx.ui.setFooter(undefined); // clear any leftover, then re-install below
+        installFooter(ctx.ui);
         ctx.ui.notify(`[${LOG}] Enabled.`, "info"); return;
       }
       if (cmd === "reset") {
