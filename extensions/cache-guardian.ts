@@ -366,7 +366,7 @@ function showStats(
   runtimeEnabled: boolean,
 ) {
   const total = snap.totalCacheRead + snap.totalInput;
-  const agg = total > 0 ? Math.round((snap.totalCacheRead / total) * 100) : 0;
+  const agg = total > 0 ? Math.round((snap.totalCacheRead / total) * 100) : null;
   const tail = reports.length >= 3
     ? (() => { const tail = reports.slice(-3); const tailTotal = tail.reduce((s, r) => s + r.input + r.cacheRead, 0); return tailTotal > 0 ? Math.round((tail.reduce((s, r) => s + r.cacheRead, 0) / tailTotal) * 100) : null; })()
     : null;
@@ -376,13 +376,13 @@ function showStats(
   const lines = [
     `State: ${runtimeEnabled ? "enabled" : "disabled"}`,
     `Turns: ${snap.turns}`,
-    `Aggregate hit: ${agg}%  (read=${snap.totalCacheRead} / total=${total})`,
+    `Aggregate hit: ${agg !== null ? agg + "%" : "n/a"}  (read=${snap.totalCacheRead} / total=${total})`,
     `Cumulative: input=${snap.totalInput}  cacheRead=${snap.totalCacheRead}  cacheWrite=${snap.totalCacheWrite}`,
     `Golden system prompt: ${goldenInfo}`,
     compInfo,
   ];
   if (tail !== null) lines.push(`Tail (last 3) hit: ${tail}%`);
-  if (guardEnabled) lines.push(`Cache guard: ${agg}% vs threshold=${guardThreshold}%${agg < guardThreshold ? " [BELOW]" : ""}`);
+  if (guardEnabled) lines.push(`Cache guard: ${agg !== null ? agg + "%" : "n/a"} vs threshold=${guardThreshold}%${agg !== null && agg < guardThreshold ? " [BELOW]" : ""}`);
   if (pcr400.size > 0) lines.push(`400 models (prompt_cache_retention): ${[...pcr400].join(", ")}`);
   if (at400.size > 0) lines.push(`Anthropic TTL 400 models: ${[...at400].join(", ")}`);
   if (reports.length > 0) {
