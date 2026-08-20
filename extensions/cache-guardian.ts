@@ -321,9 +321,8 @@ export default function (pi: ExtensionAPI) {
     turnReports = [];
   });
 
-  // ── 7. /cache-guardian command (with cache-guardimizer alias) ──
+  // ── 7. /cache-guardian command ──
   pi.registerCommand("cache-guardian", { description: "Cache optimizer: enable/disable/stats/doctor/reset", handler: async (args, ctx) => { handleCommand(args, ctx); } });
-  pi.registerCommand("cache-guardimizer", { description: "Alias for /cache-guardian", handler: async (args, ctx) => { handleCommand(args, ctx); } });
   async function handleCommand(args: string | undefined, ctx: any) {
       const raw = args ?? "";
       const parts = raw.trim().split(/\s+/);
