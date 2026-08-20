@@ -66,6 +66,7 @@ cp pi-cache-guardian/extensions/cache-guardian.ts ~/.pi/agent/extensions/
 | `PI_CACHE_GUARD_THRESHOLD` | `90` | Cache guard hit-rate threshold |
 | `PI_CACHE_GUARD_NO_SKILL_COMPRESSION` | `0` | Disable skill compression |
 | `PI_CACHE_GUARD_NO_PROMPT_REWRITE` | `0` | Disable prompt reorder (freeze only) |
+| `PI_CACHE_GUARD_STRIP_RETENTION` | `0` | Proactively strip `prompt_cache_retention` from all requests (no 400 needed) |
 
 ## Commands
 

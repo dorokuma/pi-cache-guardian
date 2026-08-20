@@ -66,6 +66,7 @@ cp pi-cache-guardian/extensions/cache-guardian.ts ~/.pi/agent/extensions/
 | `PI_CACHE_GUARD_THRESHOLD` | `90` | 缓存守护命中率阈值 |
 | `PI_CACHE_GUARD_NO_SKILL_COMPRESSION` | `0` | 禁用 skills 压缩 |
 | `PI_CACHE_GUARD_NO_PROMPT_REWRITE` | `0` | 禁用 prompt reorder（仅做冻结） |
+| `PI_CACHE_GUARD_STRIP_RETENTION` | `0` | 主动剥离 `prompt_cache_retention`（无需 400 响应） |
 
 ## 命令
 

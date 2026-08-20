@@ -186,6 +186,7 @@ export default function (pi: ExtensionAPI) {
   const guardEnabled = isEnabled(process.env.PI_CACHE_GUARD);
   const guardThreshold = (() => { const r = process.env.PI_CACHE_GUARD_THRESHOLD; const n = Number(r); return Number.isFinite(n) && n > 0 ? n : 90; })();
   const noPromptRewrite = isEnabled(process.env.PI_CACHE_GUARD_NO_PROMPT_REWRITE);
+  const stripRetention = isEnabled(process.env.PI_CACHE_GUARD_STRIP_RETENTION);
 
   // ── 1. before_agent_start: reorder + compress + strip + freeze ──
   pi.on("before_agent_start", async (event, ctx) => {
@@ -234,9 +235,9 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
-    // Strip prompt_cache_retention for known-broken models
+    // Strip prompt_cache_retention for known-broken models, or proactively when PI_CACHE_GUARD_STRIP_RETENTION=1
     if (typeof payload.prompt_cache_retention === "string") {
-      if (promptCacheRetention400.has(mk)) {
+      if (stripRetention || promptCacheRetention400.has(mk)) {
         delete payload.prompt_cache_retention;
       }
     }
