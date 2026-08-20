@@ -1,11 +1,11 @@
 /**
- * cache-guardimizer — consolidated cache optimisation for Pi Agent.
+ * cache-guardian — consolidated cache optimisation for Pi Agent.
  *
  * Combines prompt reordering, skill compression, session-overview churn
  * stripping, system prompt freeze, cache key injection, compatibility
  * guards, and footer stats in a single extension.
  *
- * Install: copy to ~/.pi/agent/extensions/cache-guardimizer.ts
+ * Install: copy to ~/.pi/agent/extensions/cache-guardian.ts
  */
 
 import type { ExtensionAPI, BuildSystemPromptOptions } from "@earendil-works/pi-coding-agent";
@@ -19,7 +19,7 @@ const MIN_STABLE_LEN = 8;
 const LOG = "cache-guard";
 
 // ── Runtime state (module-level) ─────────────────────────────────────────────
-// Set PI_CACHE_RETENTION=long at startup (captured so /cache-guardimizer disable
+// Set PI_CACHE_RETENTION=long at startup (captured so /cache-guardian disable
 // can restore the startup value for this Pi process).
 const RETENTION_BASELINE = (() => {
   const env = process.env;
@@ -307,7 +307,7 @@ export default function (pi: ExtensionAPI) {
     const total = snapshot.totalCacheRead + snapshot.totalInput;
     const agg = total > 0 ? Math.round((snapshot.totalCacheRead / total) * 100) : 0;
     if (agg < guardThreshold) {
-      ctx.ui.notify(`[${LOG}] Cache guard: aggregate=${agg}% < threshold=${guardThreshold}%. Check /cache-guardimizer stats.`, "warn");
+      ctx.ui.notify(`[${LOG}] Cache guard: aggregate=${agg}% < threshold=${guardThreshold}%. Check /cache-guardian stats.`, "warning");
     }
   });
 
@@ -319,10 +319,10 @@ export default function (pi: ExtensionAPI) {
     compactionCacheLoss = 0;
   });
 
-  // ── 7. /cache-guardimizer command ──
-  pi.registerCommand("cache-guardimizer", {
-    description: "Cache optimizer: enable/disable/stats/doctor/reset",
-    handler: async (args, ctx) => {
+  // ── 7. /cache-guardian command (with cache-guardimizer alias) ──
+  pi.registerCommand("cache-guardian", { description: "Cache optimizer: enable/disable/stats/doctor/reset", handler: async (args, ctx) => { handleCommand(args, ctx); } });
+  pi.registerCommand("cache-guardimizer", { description: "Alias for /cache-guardian", handler: async (args, ctx) => { handleCommand(args, ctx); } });
+  async function handleCommand(args: string | undefined, ctx: any) {
       const raw = args ?? "";
       const parts = raw.trim().split(/\s+/);
       const cmd = (parts[0] ?? "").toLowerCase();
@@ -346,8 +346,7 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.notify(`[${LOG}] All cache stats and compat state reset.`, "info"); return;
       }
       showStats(ctx, snapshot, turnReports, compactionCacheLoss, goldenSystemPrompt, guardEnabled, guardThreshold, promptCacheRetention400, anthropicTtl400, runtimeEnabled);
-    },
-  });
+  }
 }
 
 function showStats(
