@@ -368,7 +368,7 @@ function showStats(
   const total = snap.totalCacheRead + snap.totalInput;
   const agg = total > 0 ? Math.round((snap.totalCacheRead / total) * 100) : 0;
   const tail = reports.length >= 3
-    ? Math.round((reports.slice(-3).reduce((s, r) => s + r.cacheRead, 0) / reports.slice(-3).reduce((s, r) => s + r.input + r.cacheRead, 0)) * 100)
+    ? (() => { const tail = reports.slice(-3); const tailTotal = tail.reduce((s, r) => s + r.input + r.cacheRead, 0); return tailTotal > 0 ? Math.round((tail.reduce((s, r) => s + r.cacheRead, 0) / tailTotal) * 100) : null; })()
     : null;
   const goldenInfo = golden ? `${golden.length} bytes (~${estimateTokens(golden.length)} tokens)` : "not yet captured";
   const compInfo = compactionLoss > 0 ? `cache lost to compaction: ${compactionLoss} tokens` : "no compaction loss";
