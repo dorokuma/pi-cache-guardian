@@ -75,6 +75,10 @@ function formatWindow(n: number): string {
 function sheepMeat(s: string): string {
   return s.replace(/^\s*[◆●▲■]?\s*(?:Shepherd\s*[·•|｜]\s*)?/i, "").trim();
 }
+/** Strip trailing " (provider)" from model display names; leave inner parens intact. */
+function stripProvider(name: string): string {
+  return name.replace(/ \([^)]*\)$/, "");
+}
 /** Snapshot current model / thinking / context usage into footer state. */
 function readFooterCtx(ctx: any) {
   footerModelName = ctx?.model?.name ?? "";
@@ -108,7 +112,7 @@ function installFooter(ui: any) {
         parts.push(`${theme.fg("dim", FOOTER_ICON.context)} ${ctxStr}`);
         // 4. model name + thinking level — icon ■
         if (footerModelName) {
-          let m: string = footerModelName;
+          let m: string = stripProvider(footerModelName);
           if (footerThinking) m += ` · ${footerThinking}`;
           parts.push(`${theme.fg("dim", FOOTER_ICON.model)} ${theme.fg("text", m)}`);
         }
