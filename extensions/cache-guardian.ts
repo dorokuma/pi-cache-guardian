@@ -188,7 +188,7 @@ export default function (pi: ExtensionAPI) {
   const noPromptRewrite = isEnabled(process.env.PI_CACHE_GUARD_NO_PROMPT_REWRITE);
 
   // ── 1. before_agent_start: reorder + compress + strip + freeze ──
-  pi.on("before_agent_start", async (event, _ctx) => {
+  pi.on("before_agent_start", async (event, ctx) => {
     if (!runtimeEnabled) return;
 
     // Freeze-only (golden already captured, always restore)
@@ -210,7 +210,7 @@ export default function (pi: ExtensionAPI) {
     const optimized = optimizePrompt(compressed, event.systemPromptOptions);
 
     goldenSystemPrompt = optimized.changed ? optimized.prompt : event.systemPrompt;
-    if (verbose) _ctx.ui.notify(`[${LOG}] Golden prompt captured: ${goldenSystemPrompt.length} bytes (~${estimateTokens(goldenSystemPrompt.length)} tokens)`, "info");
+    if (verbose) ctx.ui.notify(`[${LOG}] Golden prompt captured: ${goldenSystemPrompt.length} bytes (~${estimateTokens(goldenSystemPrompt.length)} tokens)`, "info");
     return optimized.changed ? { systemPrompt: optimized.prompt } : undefined;
   });
 
@@ -270,13 +270,13 @@ export default function (pi: ExtensionAPI) {
       if (m.api === "openai-completions") {
         if (!promptCacheRetention400.has(mk)) {
           promptCacheRetention400.add(mk);
-          _ctx.ui.notify(`[${LOG}] ${mk} rejected prompt_cache_retention (400). Stripping on future requests.`, "warning");
+          ctx.ui.notify(`[${LOG}] ${mk} rejected prompt_cache_retention (400). Stripping on future requests.`, "warning");
         }
       }
       if (m.api === "anthropic-messages") {
         if (!anthropicTtl400.has(mk)) {
           anthropicTtl400.add(mk);
-          _ctx.ui.notify(`[${LOG}] ${mk} rejected Anthropic cache_control TTL (400). Downgrading.`, "warning");
+          ctx.ui.notify(`[${LOG}] ${mk} rejected Anthropic cache_control TTL (400). Downgrading.`, "warning");
         }
       }
     }
