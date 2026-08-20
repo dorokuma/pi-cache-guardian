@@ -213,7 +213,7 @@ export default function (pi: ExtensionAPI) {
     // regardless of whether optimizePrompt changed anything. This ensures that even when only
     // strip or compress made changes, the golden is the processed prompt, not the original.
     goldenSystemPrompt = optimized.prompt;
-    if (verbose) ctx.ui.notify(`[${LOG}] Golden prompt captured: ${goldenSystemPrompt.length} bytes (~${estimateTokens(goldenSystemPrompt.length)} tokens)`, "info");
+    if (verbose) console.error(`[${LOG}] Golden prompt captured: ${goldenSystemPrompt.length} bytes (~${estimateTokens(goldenSystemPrompt.length)} tokens)`);
     return optimized.changed ? { systemPrompt: optimized.prompt } : undefined;
   });
 

@@ -61,7 +61,7 @@ cp pi-cache-guardian/extensions/cache-guardian.ts ~/.pi/agent/extensions/
 
 | 变量 | 默认值 | 说明 |
 | ------ | -------- | ------ |
-| `PI_CACHE_GUARD_VERBOSE` | `0` | 每轮打印缓存统计到 stderr |
+| `PI_CACHE_GUARD_VERBOSE` | `0` | 每轮打印缓存统计到 stderr（console.error） |
 | `PI_CACHE_GUARD` | `0` | session 结束时启用缓存守护警告 |
 | `PI_CACHE_GUARD_THRESHOLD` | `90` | 缓存守护命中率阈值 |
 | `PI_CACHE_GUARD_NO_SKILL_COMPRESSION` | `0` | 禁用 skills 压缩 |

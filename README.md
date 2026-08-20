@@ -61,7 +61,7 @@ cp pi-cache-guardian/extensions/cache-guardian.ts ~/.pi/agent/extensions/
 
 | Variable | Default | Description |
 | ---------- | --------- | ------------- |
-| `PI_CACHE_GUARD_VERBOSE` | `0` | Print per-turn cache stats to stderr |
+| `PI_CACHE_GUARD_VERBOSE` | `0` | Print per-turn cache stats to stderr (console.error) |
 | `PI_CACHE_GUARD` | `0` | Enable cache guard warning at session end |
 | `PI_CACHE_GUARD_THRESHOLD` | `90` | Cache guard hit-rate threshold |
 | `PI_CACHE_GUARD_NO_SKILL_COMPRESSION` | `0` | Disable skill compression |
