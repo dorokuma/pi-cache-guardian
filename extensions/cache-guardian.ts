@@ -210,7 +210,10 @@ export default function (pi: ExtensionAPI) {
     const compressed = compressSkills(stripped, event.systemPromptOptions);
     const optimized = optimizePrompt(compressed, event.systemPromptOptions);
 
-    goldenSystemPrompt = optimized.changed ? optimized.prompt : event.systemPrompt;
+    // Golden freeze: the final result of the full chain (strip → compress → reorder) is the golden,
+    // regardless of whether optimizePrompt changed anything. This ensures that even when only
+    // strip or compress made changes, the golden is the processed prompt, not the original.
+    goldenSystemPrompt = optimized.prompt;
     if (verbose) ctx.ui.notify(`[${LOG}] Golden prompt captured: ${goldenSystemPrompt.length} bytes (~${estimateTokens(goldenSystemPrompt.length)} tokens)`, "info");
     return optimized.changed ? { systemPrompt: optimized.prompt } : undefined;
   });
