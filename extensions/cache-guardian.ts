@@ -35,7 +35,6 @@ let runtimeEnabled = true;
 let goldenSystemPrompt: string | null = null;
 let snapshot = { totalCacheRead: 0, totalCacheWrite: 0, totalInput: 0, turns: 0 };
 let turnReports: Array<{ turn: number; input: number; cacheRead: number; cacheWrite: number; hitPct: number }> = [];
-let compactionCacheLoss = 0;
 let promptCacheRetention400 = new Set<string>();
 let anthropicTtl400 = new Set<string>();
 
@@ -320,7 +319,6 @@ export default function (pi: ExtensionAPI) {
     goldenSystemPrompt = null;
     snapshot = { totalCacheRead: 0, totalCacheWrite: 0, totalInput: 0, turns: 0 };
     turnReports = [];
-    compactionCacheLoss = 0;
   });
 
   // ── 7. /cache-guardian command (with cache-guardimizer alias) ──
@@ -346,10 +344,10 @@ export default function (pi: ExtensionAPI) {
         promptCacheRetention400.clear(); anthropicTtl400.clear();
         goldenSystemPrompt = null;
         snapshot = { totalCacheRead: 0, totalCacheWrite: 0, totalInput: 0, turns: 0 };
-        turnReports = []; compactionCacheLoss = 0;
+        turnReports = [];
         ctx.ui.notify(`[${LOG}] All cache stats and compat state reset.`, "info"); return;
       }
-      showStats(ctx, snapshot, turnReports, compactionCacheLoss, goldenSystemPrompt, guardEnabled, guardThreshold, promptCacheRetention400, anthropicTtl400, runtimeEnabled);
+      showStats(ctx, snapshot, turnReports, goldenSystemPrompt, guardEnabled, guardThreshold, promptCacheRetention400, anthropicTtl400, runtimeEnabled);
   }
 }
 
@@ -357,7 +355,6 @@ function showStats(
   ctx: any,
   snap: typeof snapshot,
   reports: typeof turnReports,
-  compactionLoss: number,
   golden: string | null,
   guardEnabled: boolean,
   guardThreshold: number,
@@ -371,7 +368,6 @@ function showStats(
     ? (() => { const tail = reports.slice(-3); const tailTotal = tail.reduce((s, r) => s + r.input + r.cacheRead, 0); return tailTotal > 0 ? Math.round((tail.reduce((s, r) => s + r.cacheRead, 0) / tailTotal) * 100) : null; })()
     : null;
   const goldenInfo = golden ? `${golden.length} bytes (~${estimateTokens(golden.length)} tokens)` : "not yet captured";
-  const compInfo = compactionLoss > 0 ? `cache lost to compaction: ${compactionLoss} tokens` : "no compaction loss";
 
   const lines = [
     `State: ${runtimeEnabled ? "enabled" : "disabled"}`,
@@ -379,7 +375,6 @@ function showStats(
     `Aggregate hit: ${agg !== null ? agg + "%" : "n/a"}  (read=${snap.totalCacheRead} / total=${total})`,
     `Cumulative: input=${snap.totalInput}  cacheRead=${snap.totalCacheRead}  cacheWrite=${snap.totalCacheWrite}`,
     `Golden system prompt: ${goldenInfo}`,
-    compInfo,
   ];
   if (tail !== null) lines.push(`Tail (last 3) hit: ${tail}%`);
   if (guardEnabled) lines.push(`Cache guard: ${agg !== null ? agg + "%" : "n/a"} vs threshold=${guardThreshold}%${agg !== null && agg < guardThreshold ? " [BELOW]" : ""}`);

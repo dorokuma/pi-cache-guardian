@@ -68,6 +68,8 @@ cp pi-cache-guardian/extensions/cache-guardian.ts ~/.pi/agent/extensions/
 | `PI_CACHE_GUARD_NO_PROMPT_REWRITE` | `0` | 禁用 prompt reorder（仅做冻结） |
 | `PI_CACHE_GUARD_STRIP_RETENTION` | `0` | 主动剥离 `prompt_cache_retention`（无需 400 响应） |
 
+> **说明：** `compactionCacheLoss` 字段已移除。Pi 扩展 API 没有可靠的 compaction 事件来累计该值，因此缓存丢失统计不跟踪 compaction 损失。
+
 ## 命令
 
 ```

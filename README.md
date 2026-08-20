@@ -68,6 +68,8 @@ cp pi-cache-guardian/extensions/cache-guardian.ts ~/.pi/agent/extensions/
 | `PI_CACHE_GUARD_NO_PROMPT_REWRITE` | `0` | Disable prompt reorder (freeze only) |
 | `PI_CACHE_GUARD_STRIP_RETENTION` | `0` | Proactively strip `prompt_cache_retention` from all requests (no 400 needed) |
 
+> **Note:** The `compactionCacheLoss` field was removed. The Pi extension API has no reliable compaction event to accumulate it. Cache loss due to compaction is not tracked.
+
 ## Commands
 
 ```
