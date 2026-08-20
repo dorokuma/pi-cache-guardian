@@ -290,7 +290,10 @@ export default function (pi: ExtensionAPI) {
     snapshot.turns += 1;
     let cr = 0, cw = 0, inp = 0;
     for (const msg of event.messages ?? []) {
-      const u = msg.usage; if (!u) continue;
+      // `usage` is only present on assistant messages; other message kinds in the
+      // AgentMessage union (e.g. BashExecutionMessage) carry no usage field.
+      if (msg.role !== "assistant" || !("usage" in msg) || !msg.usage) continue;
+      const u = msg.usage;
       inp += u.input ?? 0; cr += u.cacheRead ?? 0; cw += u.cacheWrite ?? 0;
     }
     snapshot.totalCacheRead += cr;
