@@ -71,9 +71,9 @@ function formatWindow(n: number): string {
   if (n >= 1_000) return `${Math.round(n / 1_000)}K`;
   return String(n);
 }
-/** Strip the leading "◆ Shepherd · " marker from the shepherd extension status. */
+/** Strip the leading footer marker from the shepherd/herdsman extension status. */
 function sheepMeat(s: string): string {
-  return s.replace(/^\s*[◆●▲■]?\s*(?:Shepherd\s*[·•|｜]\s*)?/i, "").trim();
+  return s.replace(/^\s*[◆◇●▲■]?\s*(?:(?:Shepherd|Herdsman)(?:\s*[·•|｜]\s*)?)/i, "").trim();
 }
 /** Strip trailing " (provider)" from model display names; leave inner parens intact. */
 function stripProvider(name: string): string {
@@ -96,9 +96,13 @@ function installFooter(ui: any) {
     return {
       render(_width: number): string[] {
         const parts: string[] = [];
-        // 1. shepherd status (only if set) — icon ●
-        const sheep = footerData.getExtensionStatuses().get("shepherd");
-        if (sheep) parts.push(`${theme.fg("dim", FOOTER_ICON.sheep)} ${theme.fg("text", sheepMeat(sheep))}`);
+        // 1. shepherd/herdsman status (only if set) — icon ●
+        const statuses = footerData.getExtensionStatuses();
+        const sheep = statuses.get("herdsman") ?? statuses.get("shepherd");
+        if (sheep) {
+          const meat = sheepMeat(sheep);
+          parts.push(`${theme.fg("dim", FOOTER_ICON.sheep)} ${theme.fg("text", meat || "Herdsman")}`);
+        }
         // 2. cache hit rate (session cumulative) — icon ◆
         const total = snapshot.totalCacheRead + snapshot.totalInput;
         const hit = total > 0 ? Math.round((snapshot.totalCacheRead / total) * 100) : null;
