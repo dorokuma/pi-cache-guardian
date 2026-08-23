@@ -64,6 +64,8 @@ function esc(s: string): string {
 }
 function modelKey(m: any): string { return m ? `${m.provider}/${m.id}` : "unknown"; }
 
+// Pi's after_provider_response event exposes only status and headers; response bodies are unavailable.
+
 // ── Custom footer helpers ────────────────────────────────────────────
 /** Compact token window: "1.0M" / "800K" / raw. */
 function formatWindow(n: number): string {
@@ -346,17 +348,17 @@ export default function (pi: ExtensionAPI) {
     const hLower: Record<string, string> = {};
     for (const [k, v] of Object.entries(h)) hLower[k.toLowerCase()] = v;
 
-    if (event.status === 400 && hLower["content-type"]?.includes("application/json")) {
+    if (event.status === 400) {
       if (m.api === "openai-completions") {
         if (!promptCacheRetention400.has(mk)) {
           promptCacheRetention400.add(mk);
-          ctx.ui.notify(`[${LOG}] ${mk} rejected prompt_cache_retention (400). Stripping on future requests.`, "warning");
+          ctx.ui.notify(`[${LOG}] ${mk} returned 400 for a cache parameter; reason unknown (Pi exposes status/headers only). Cache retention was not classified.`, "warning");
         }
       }
       if (m.api === "anthropic-messages") {
         if (!anthropicTtl400.has(mk)) {
           anthropicTtl400.add(mk);
-          ctx.ui.notify(`[${LOG}] ${mk} rejected Anthropic cache_control TTL (400). Downgrading.`, "warning");
+          ctx.ui.notify(`[${LOG}] ${mk} returned 400 for a cache parameter; reason unknown (Pi exposes status/headers only). Cache TTL was not classified.`, "warning");
         }
       }
     }

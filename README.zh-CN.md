@@ -20,7 +20,7 @@ Pi Agent 有完善的事件系统和扩展 API，但默认没有针对 provider 
 
 ### 3. Skills 压缩
 
-> 4 个技能时，将 Pi 的 4 行 XML 块（`<name>`/`<description>`/`<location>`）压缩为一行索引。31 个技能时可将 13.3 KB 缩减到 ~1 KB，同时保持模型可发现性。
+4 个及以上技能时，将 Pi 的 4 行 XML 块（`<name>`/`<description>`/`<location>`）压缩为一行索引。31 个技能时可将 13.3 KB 缩减到 ~1 KB，同时保持模型可发现性。
 
 ### 4. Session-overview churn strip
 
@@ -28,8 +28,8 @@ Pi Agent 有完善的事件系统和扩展 API，但默认没有针对 provider 
 
 ### 5. 兼容自动检测
 
-- OpenAI `prompt_cache_retention` 被 400 拒绝时自动剥离
-- Anthropic TTL 排序被 400 拒绝时自动降级
+- 400 响应只按 status/headers 记录缓存参数错误并报告「原因未知」；扩展 API 不暴露响应正文，因此不会安全地断言具体被拒绝的参数。
+- Anthropic 缓存兼容性同样只基于 status/headers 信号；没有真实正文依据时不会误判并禁用 cache retention。
 - `prompt_cache_key` 注入（OpenAI 兼容接口）
 
 ### 6. 缓存守护
@@ -67,6 +67,10 @@ cp pi-cache-guardian/extensions/cache-guardian.ts ~/.pi/agent/extensions/
 | `PI_CACHE_GUARD_NO_SKILL_COMPRESSION` | `0` | 禁用 skills 压缩 |
 | `PI_CACHE_GUARD_NO_PROMPT_REWRITE` | `0` | 禁用 prompt reorder（仅做冻结） |
 | `PI_CACHE_GUARD_STRIP_RETENTION` | `0` | 主动剥离 `prompt_cache_retention`（无需 400 响应） |
+| `PI_CACHE_GUARD_FOOTER` | 启用 | 默认启用自定义 footer；设为 `0` 或 `false` 可关闭 |
+| `PI_CACHE_NO_OPENAI_CACHE_KEY` | `0` | 设为 `1`、`true`、`yes` 或 `on` 时禁用 OpenAI `prompt_cache_key` 注入 |
+| `PI_CACHE_OPENAI_CACHE_KEY` | 启用 | 设为 `0` 或 `false` 时禁用 OpenAI `prompt_cache_key` 注入 |
+| `PI_CACHE_RETENTION` | 加载模块时为 `long` | 模块加载时将其设为 `long`；`/cache-guardian disable` 在当前进程恢复启动基线 |
 
 > **说明：** `compactionCacheLoss` 字段已移除。Pi 扩展 API 没有可靠的 compaction 事件来累计该值，因此缓存丢失统计不跟踪 compaction 损失。
 

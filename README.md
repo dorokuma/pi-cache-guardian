@@ -20,7 +20,7 @@ The most stable content in the system prompt (custom prompt, tool snippets, guid
 
 ### 3. Skill compression
 
-With > 4 skills, Pi's 4-line XML block per skill (`<name>`/`<description>`/`<location>`) is compressed into a one-line index. With 31 skills this reduces ~13.3 KB to ~1 KB while preserving model discoverability.
+With 4 or more skills, Pi's 4-line XML block per skill (`<name>`/`<description>`/`<location>`) is compressed into a one-line index. With 31 skills this reduces ~13.3 KB to ~1 KB while preserving model discoverability.
 
 ### 4. Session-overview churn strip
 
@@ -28,8 +28,8 @@ Removes per-turn changing fields in trellis's `<session-overview>` (RECENT COMMI
 
 ### 5. Automatic compatibility detection
 
-- Strips `prompt_cache_retention` when rejected with 400 by OpenAI
-- Downgrades Anthropic TTL ordering when rejected with 400
+- Records a 400 response for cache parameters with status/headers only and reports the reason as unknown; the extension API does not expose the response body, so it cannot safely classify the rejected parameter.
+- Anthropic cache compatibility remains based on the same status/headers-only signal; no cache retention is disabled from an unproven body claim.
 - Injects `prompt_cache_key` (OpenAI-compatible endpoints)
 
 ### 6. Cache guard
@@ -67,6 +67,10 @@ cp pi-cache-guardian/extensions/cache-guardian.ts ~/.pi/agent/extensions/
 | `PI_CACHE_GUARD_NO_SKILL_COMPRESSION` | `0` | Disable skill compression |
 | `PI_CACHE_GUARD_NO_PROMPT_REWRITE` | `0` | Disable prompt reorder (freeze only) |
 | `PI_CACHE_GUARD_STRIP_RETENTION` | `0` | Proactively strip `prompt_cache_retention` from all requests (no 400 needed) |
+| `PI_CACHE_GUARD_FOOTER` | enabled | Custom footer is enabled by default; set to `0` or `false` to disable |
+| `PI_CACHE_NO_OPENAI_CACHE_KEY` | `0` | Disable OpenAI `prompt_cache_key` injection when set to `1`, `true`, `yes`, or `on` |
+| `PI_CACHE_OPENAI_CACHE_KEY` | enabled | Disable OpenAI `prompt_cache_key` injection by setting to `0` or `false` |
+| `PI_CACHE_RETENTION` | `long` at module load | The extension sets this to `long` when loaded; `/cache-guardian disable` restores the startup baseline for the current process |
 
 > **Note:** The `compactionCacheLoss` field was removed. The Pi extension API has no reliable compaction event to accumulate it. Cache loss due to compaction is not tracked.
 
