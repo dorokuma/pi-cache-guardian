@@ -116,11 +116,10 @@ function installFooter(ui: any) {
           ? theme.fg("text", `${Math.round(cu.percent)}%/${formatWindow(cu.contextWindow)}`)
           : theme.fg("dim", "n/a");
         parts.push(`${theme.fg("dim", FOOTER_ICON.context)} ${ctxStr}`);
-        // 4. model name + thinking level — icon ■
-        if (footerModelName) {
-          let m: string = stripProvider(footerModelName);
-          if (footerThinking) m += ` · ${footerThinking}`;
-          parts.push(`${theme.fg("dim", FOOTER_ICON.model)} ${theme.fg("text", m)}`);
+        // 4. thinking level only — icon ■ (model name hidden: keeps the footer
+        //    narrow so it never exceeds the terminal width on small screens)
+        if (footerThinking) {
+          parts.push(`${theme.fg("dim", FOOTER_ICON.model)} ${theme.fg("text", footerThinking)}`);
         }
         return [parts.join(theme.fg("dim", " | "))];
       },
