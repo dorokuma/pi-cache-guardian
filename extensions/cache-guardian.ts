@@ -67,12 +67,6 @@ function modelKey(m: any): string { return m ? `${m.provider}/${m.id}` : "unknow
 // Pi's after_provider_response event exposes only status and headers; response bodies are unavailable.
 
 // ── Custom footer helpers ────────────────────────────────────────────
-/** Compact token window: "1.0M" / "800K" / raw. */
-function formatWindow(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${Math.round(n / 1_000)}K`;
-  return String(n);
-}
 /** Strip the leading footer marker from the shepherd/herdsman extension status. */
 function sheepMeat(s: string): string {
   return s.replace(/^\s*[◆◇●▲■]?\s*(?:(?:Shepherd|Herdsman)(?:\s*[·•|｜]\s*)?)/i, "").trim();
@@ -110,16 +104,17 @@ function installFooter(ui: any) {
         const hit = total > 0 ? Math.round((snapshot.totalCacheRead / total) * 100) : null;
         const hitStr = hit === null ? theme.fg("dim", "n/a") : theme.fg("text", `${hit}%`);
         parts.push(`${theme.fg("dim", FOOTER_ICON.hit)} ${hitStr}`);
-        // 3. context usage — icon ▲
+        // 3. context usage — icon ▲ (percent only)
         const cu = footerContext;
         const ctxStr = cu && cu.percent !== null
-          ? theme.fg("text", `${Math.round(cu.percent)}%/${formatWindow(cu.contextWindow)}`)
+          ? theme.fg("text", `${Math.round(cu.percent)}%`)
           : theme.fg("dim", "n/a");
         parts.push(`${theme.fg("dim", FOOTER_ICON.context)} ${ctxStr}`);
-        // 4. thinking level only — icon ■ (model name hidden: keeps the footer
-        //    narrow so it never exceeds the terminal width on small screens)
-        if (footerThinking) {
-          parts.push(`${theme.fg("dim", FOOTER_ICON.model)} ${theme.fg("text", footerThinking)}`);
+        // 4. model name + thinking level — icon ■ (single segment, merged)
+        if (footerModelName) {
+          let m: string = stripProvider(footerModelName);
+          if (footerThinking) m += ` · ${footerThinking}`;
+          parts.push(`${theme.fg("dim", FOOTER_ICON.model)} ${theme.fg("text", m)}`);
         }
         return [parts.join(theme.fg("dim", " | "))];
       },
