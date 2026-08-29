@@ -9,6 +9,7 @@
  */
 
 import type { ExtensionAPI, BuildSystemPromptOptions, SessionManager } from "@earendil-works/pi-coding-agent";
+import { truncateToWidth } from "@earendil-works/pi-tui";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const PI_CACHE_RETENTION_ENV = "PI_CACHE_RETENTION";
@@ -147,12 +148,22 @@ function readFooterCtx(ctx: any) {
 function refreshFooter() {
   footerTui?.requestRender?.(true);
 }
+/**
+ * Truncate a single-line footer text to width, ensuring it never wraps.
+ * Preserves the beginning of the line and appends ellipsis if truncated.
+ */
+export function truncateFooter(line: string, width: number, theme?: any): string {
+  const maxWidth = Math.max(0, width ?? 0);
+  const ellipsis = theme?.fg ? theme.fg("dim", "…") : "…";
+  return truncateToWidth(line, maxWidth, ellipsis);
+}
+
 /** Register the custom footer. Pass ctx having a live UI for the mode guard. */
 function installFooter(ui: any) {
   ui.setFooter((tui: any, theme: any, footerData: any) => {
     footerTui = tui;
     return {
-      render(_width: number): string[] {
+      render(width: number): string[] {
         const parts: string[] = [];
         // 1. shepherd/herdsman status (only if set) — icon ●
         const statuses = footerData.getExtensionStatuses();
@@ -177,7 +188,8 @@ function installFooter(ui: any) {
           if (footerThinking) m += ` · ${footerThinking}`;
           parts.push(`${theme.fg("dim", FOOTER_ICON.model)} ${theme.fg("text", m)}`);
         }
-        return [parts.join(theme.fg("dim", " | "))];
+        const fullLine = parts.join(theme.fg("dim", " | "));
+        return [truncateFooter(fullLine, width, theme)];
       },
       invalidate() {},
       dispose() { footerTui = null; },

@@ -98,4 +98,46 @@ import { cacheHitDenom, cacheHitPct, aggregateHit } from "../extensions/cache-gu
   assert.equal(aggHit, 78);
 }
 
-console.log("All hit-rate tests passed!");
+// 7. Footer truncation verification
+import { visibleWidth, stripTerminalSequences } from "@earendil-works/pi-tui";
+import { truncateFooter } from "../extensions/cache-guardian.ts";
+
+{
+  const dummyTheme = {
+    fg: (style, text) => (style === "dim" ? `\x1b[2m${text}\x1b[22m` : text),
+  };
+  const fullLine = "\x1b[2m●\x1b[22m Herdsman \x1b[2m|\x1b[22m \x1b[2m◆\x1b[22m 85% \x1b[2m|\x1b[22m \x1b[2m▲\x1b[22m 42% \x1b[2m|\x1b[22m \x1b[2m■\x1b[22m deepseek-v4-flash";
+  const fullWidth = visibleWidth(fullLine);
+
+  // Ample width
+  const wide = truncateFooter(fullLine, 100, dummyTheme);
+  assert.equal(wide, fullLine);
+  assert.equal(visibleWidth(wide), fullWidth);
+
+  // Exact width
+  const exact = truncateFooter(fullLine, fullWidth, dummyTheme);
+  assert.equal(exact, fullLine);
+  assert.equal(visibleWidth(exact), fullWidth);
+
+  // Narrow width truncation: output visibleWidth never exceeds target width
+  for (const w of [50, 40, 30, 20, 15, 10, 5, 2, 1]) {
+    const res = truncateFooter(fullLine, w, dummyTheme);
+    const vw = visibleWidth(res);
+    assert.ok(vw <= w, `width=${w} expected vw <= ${w}, got ${vw}`);
+    assert.ok(!res.includes("\n"), "footer must never contain newlines");
+  }
+
+  // Edge cases: 0 and negative width
+  assert.equal(truncateFooter(fullLine, 0, dummyTheme), "");
+  assert.equal(truncateFooter(fullLine, -5, dummyTheme), "");
+  assert.equal(truncateFooter("", 10, dummyTheme), "");
+
+  // Plain string fallback
+  const plain = "Hello world from cache-guardian footer";
+  const res = truncateFooter(plain, 10);
+  assert.ok(visibleWidth(res) <= 10);
+  assert.ok(stripTerminalSequences(res).endsWith("…") || stripTerminalSequences(res).endsWith("..."));
+}
+
+console.log("All hit-rate and footer tests passed!");
+
