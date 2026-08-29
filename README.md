@@ -34,11 +34,11 @@ Removes per-turn changing fields in trellis's `<session-overview>` (RECENT COMMI
 
 ### 6. Cache guard
 
-With `PI_CACHE_GUARD=1`, a warning is emitted at session end if the aggregate hit rate falls below the threshold (default 90%).
+With `PI_CACHE_GUARD=1`, a warning is emitted at session end if the aggregate hit rate falls below the threshold (default 90%). With the unified net input denominator, inflated hit rates (>100%) are eliminated; as a result, `PI_CACHE_GUARD` (default threshold 90%) may trigger warnings more frequently than before, which is expected.
 
 ### 7. Cache statistics
 
-Per-turn `cacheRead`/`cacheWrite`/`input` is recorded automatically; the `/cache-guardian` command shows full statistics.
+Per-turn `cacheRead`/`cacheWrite`/`input` is recorded automatically; the `/cache-guardian` command shows full statistics. Pi's `usage.input` is net input tokens across all APIs, so cache hit rates are uniformly computed as `cacheRead / (input + cacheRead + cacheWrite)`, equivalent to Prism's `prompt_tokens` denominator. Multi-turn aggregation computes `sum(cacheRead) / sum(denom)`.
 
 ## Install
 

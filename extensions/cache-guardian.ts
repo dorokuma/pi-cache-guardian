@@ -19,6 +19,68 @@ const MIN_STABLE_LEN = 8;
 const LOG = "cache-guard";
 const PI_CACHE_GUARD_FOOTER_ENV = "PI_CACHE_GUARD_FOOTER";
 
+// ── Pure cache hit rate helpers ──────────────────────────────────────────────
+export type CacheUsage = {
+  input?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+};
+
+/**
+ * Compute the aggregate percentage cache hit rate (0-100 rounded to integer).
+ * Returns null if totalDenom is <= 0.
+ */
+export function aggregateHit(totalRead: number, totalDenom: number): number | null {
+  if (totalDenom <= 0) return null;
+  return Math.round((totalRead / totalDenom) * 100);
+}
+
+/**
+ * Compute the denominator for cache hit rate calculation:
+ * `input + cacheRead + cacheWrite`
+ * (Pi's usage.input is always net input tokens across all APIs, excluding cacheRead/cacheWrite)
+ */
+export function cacheHitDenom(
+  usageOrInput: CacheUsage | number,
+  cacheRead?: number,
+  cacheWrite?: number,
+): number {
+  let input = 0;
+  let cRead = 0;
+  let cWrite = 0;
+
+  if (typeof usageOrInput === "object" && usageOrInput !== null) {
+    input = usageOrInput.input ?? 0;
+    cRead = usageOrInput.cacheRead ?? 0;
+    cWrite = usageOrInput.cacheWrite ?? 0;
+  } else {
+    input = Number(usageOrInput) || 0;
+    cRead = Number(cacheRead) || 0;
+    cWrite = Number(cacheWrite) || 0;
+  }
+
+  return input + cRead + cWrite;
+}
+
+/**
+ * Compute the percentage cache hit rate (0-100 rounded to integer).
+ * Returns null if denominator is <= 0.
+ */
+export function cacheHitPct(
+  usageOrInput: CacheUsage | number,
+  cacheRead?: number,
+  cacheWrite?: number,
+): number | null {
+  let cRead = 0;
+  if (typeof usageOrInput === "object" && usageOrInput !== null) {
+    cRead = usageOrInput.cacheRead ?? 0;
+  } else {
+    cRead = Number(cacheRead) || 0;
+  }
+  const denom = cacheHitDenom(usageOrInput, cacheRead, cacheWrite);
+  return aggregateHit(cRead, denom);
+}
+
 // ── Custom footer ────────────────────────────────────────────────────
 // Unified geometric icon set (user requirement: one symbol family, no emoji+mixin).
 const FOOTER_ICON = { sheep: "●", hit: "◆", context: "▲", model: "■" };
@@ -42,8 +104,8 @@ const RETENTION_BASELINE = (() => {
 
 let runtimeEnabled = true;
 let goldenSystemPrompt: string | null = null;
-let snapshot = { totalCacheRead: 0, totalCacheWrite: 0, totalInput: 0, turns: 0 };
-let turnReports: Array<{ turn: number; input: number; cacheRead: number; cacheWrite: number; hitPct: number }> = [];
+let snapshot = { totalCacheRead: 0, totalCacheWrite: 0, totalInput: 0, totalHitDenom: 0, turns: 0 };
+let turnReports: Array<{ turn: number; input: number; cacheRead: number; cacheWrite: number; denom: number; hitPct: number | null }> = [];
 let promptCacheRetention400 = new Set<string>();
 let anthropicTtl400 = new Set<string>();
 
@@ -100,8 +162,7 @@ function installFooter(ui: any) {
           parts.push(`${theme.fg("dim", FOOTER_ICON.sheep)} ${theme.fg("text", meat || "Herdsman")}`);
         }
         // 2. cache hit rate (session cumulative) — icon ◆
-        const total = snapshot.totalCacheRead + snapshot.totalInput;
-        const hit = total > 0 ? Math.round((snapshot.totalCacheRead / total) * 100) : null;
+        const hit = aggregateHit(snapshot.totalCacheRead, snapshot.totalHitDenom);
         const hitStr = hit === null ? theme.fg("dim", "n/a") : theme.fg("text", `${hit}%`);
         parts.push(`${theme.fg("dim", FOOTER_ICON.hit)} ${hitStr}`);
         // 3. context usage — icon ▲ (percent only)
@@ -369,17 +430,20 @@ export default function (pi: ExtensionAPI) {
       const u = msg.usage;
       inp += u.input ?? 0; cr += u.cacheRead ?? 0; cw += u.cacheWrite ?? 0;
     }
-    snapshot.totalCacheRead += cr;
-    snapshot.totalCacheWrite += cw;
+    const denom = cacheHitDenom({ input: inp, cacheRead: cr, cacheWrite: cw });
+    const hitPct = cacheHitPct({ input: inp, cacheRead: cr, cacheWrite: cw });
     snapshot.totalInput += inp;
-    const total = inp + cr;
-    const hitPct = total > 0 ? Math.round((cr / total) * 100) : 0;
-    turnReports.push({ turn: snapshot.turns, input: inp, cacheRead: cr, cacheWrite: cw, hitPct });
+    snapshot.totalCacheWrite += cw;
+    if (denom > 0) {
+      snapshot.totalCacheRead += cr;
+      snapshot.totalHitDenom += denom;
+    }
+    turnReports.push({ turn: snapshot.turns, input: inp, cacheRead: cr, cacheWrite: cw, denom, hitPct });
     if (cr > 0 || cw > 0 || verbose) {
       // ExtensionContext only exposes a read-only SessionManager, but at runtime
       // the handler receives the full SessionManager, which does provide
       // appendCustomEntry(). Cast to the full type to call it.
-      (ctx.sessionManager as SessionManager).appendCustomEntry("cache-guard-turn", { turn: snapshot.turns, input: inp, cacheRead: cr, cacheWrite: cw, hitPct });
+      (ctx.sessionManager as SessionManager).appendCustomEntry("cache-guard-turn", { turn: snapshot.turns, input: inp, cacheRead: cr, cacheWrite: cw, denom, hitPct });
     }
     // Footer: refresh cache-hit + context after each agent turn.
     readFooterCtx(ctx);
@@ -389,9 +453,8 @@ export default function (pi: ExtensionAPI) {
   // ── 5. session_shutdown: cache guard ──
   pi.on("session_shutdown", (_event, ctx) => {
     if (!guardEnabled || snapshot.turns === 0) return;
-    const total = snapshot.totalCacheRead + snapshot.totalInput;
-    const agg = total > 0 ? Math.round((snapshot.totalCacheRead / total) * 100) : 0;
-    if (agg < guardThreshold) {
+    const agg = aggregateHit(snapshot.totalCacheRead, snapshot.totalHitDenom);
+    if (agg !== null && agg < guardThreshold) {
       ctx.ui.notify(`[${LOG}] Cache guard: aggregate=${agg}% < threshold=${guardThreshold}%. Check /cache-guardian stats.`, "warning");
     }
   });
@@ -399,7 +462,7 @@ export default function (pi: ExtensionAPI) {
   // ── 6. session_start: reset state + (re)install footer when TUI active ──
   pi.on("session_start", (event, ctx) => {
     goldenSystemPrompt = null;
-    snapshot = { totalCacheRead: 0, totalCacheWrite: 0, totalInput: 0, turns: 0 };
+    snapshot = { totalCacheRead: 0, totalCacheWrite: 0, totalInput: 0, totalHitDenom: 0, turns: 0 };
     turnReports = [];
     readFooterCtx(ctx);
     if (footerOn && ctx.mode === "tui") {
@@ -441,7 +504,7 @@ export default function (pi: ExtensionAPI) {
       if (cmd === "reset") {
         promptCacheRetention400.clear(); anthropicTtl400.clear();
         goldenSystemPrompt = null;
-        snapshot = { totalCacheRead: 0, totalCacheWrite: 0, totalInput: 0, turns: 0 };
+        snapshot = { totalCacheRead: 0, totalCacheWrite: 0, totalInput: 0, totalHitDenom: 0, turns: 0 };
         turnReports = [];
         ctx.ui.notify(`[${LOG}] All cache stats and compat state reset.`, "info"); return;
       }
@@ -460,17 +523,21 @@ function showStats(
   at400: Set<string>,
   runtimeEnabled: boolean,
 ) {
-  const total = snap.totalCacheRead + snap.totalInput;
-  const agg = total > 0 ? Math.round((snap.totalCacheRead / total) * 100) : null;
+  const agg = aggregateHit(snap.totalCacheRead, snap.totalHitDenom);
   const tail = reports.length >= 3
-    ? (() => { const tail = reports.slice(-3); const tailTotal = tail.reduce((s, r) => s + r.input + r.cacheRead, 0); return tailTotal > 0 ? Math.round((tail.reduce((s, r) => s + r.cacheRead, 0) / tailTotal) * 100) : null; })()
+    ? (() => {
+        const last3 = reports.slice(-3);
+        const tailDenom = last3.reduce((s, r) => s + (r.denom > 0 ? r.denom : 0), 0);
+        const tailRead = last3.reduce((s, r) => s + (r.denom > 0 ? r.cacheRead : 0), 0);
+        return aggregateHit(tailRead, tailDenom);
+      })()
     : null;
   const goldenInfo = golden ? `${golden.length} bytes (~${estimateTokens(golden.length)} tokens)` : "not yet captured";
 
   const lines = [
     `State: ${runtimeEnabled ? "enabled" : "disabled"}`,
     `Turns: ${snap.turns}`,
-    `Aggregate hit: ${agg !== null ? agg + "%" : "n/a"}  (read=${snap.totalCacheRead} / total=${total})`,
+    `Aggregate hit: ${agg !== null ? agg + "%" : "n/a"}  (read=${snap.totalCacheRead} / denom=${snap.totalHitDenom})`,
     `Cumulative: input=${snap.totalInput}  cacheRead=${snap.totalCacheRead}  cacheWrite=${snap.totalCacheWrite}`,
     `Golden system prompt: ${goldenInfo}`,
   ];
@@ -480,7 +547,7 @@ function showStats(
   if (at400.size > 0) lines.push(`Anthropic TTL 400 models: ${[...at400].join(", ")}`);
   if (reports.length > 0) {
     lines.push("", "Per-turn:");
-    for (const r of reports) lines.push(`  T${r.turn}: i=${r.input} r=${r.cacheRead} w=${r.cacheWrite} ${r.hitPct}%`);
+    for (const r of reports) lines.push(`  T${r.turn}: i=${r.input} r=${r.cacheRead} w=${r.cacheWrite} ${r.hitPct !== null ? r.hitPct + "%" : "n/a"}`);
   }
   for (const l of lines) ctx.ui.notify(l, "info");
 }

@@ -31,14 +31,14 @@ function aggregate(results) {
     cacheRead: s.cacheRead + r.cacheRead,
     cacheWrite: s.cacheWrite + r.cacheWrite,
   }), { input: 0, cacheRead: 0, cacheWrite: 0 });
-  const total = sum.input + sum.cacheRead;
+  const total = sum.input + sum.cacheRead + sum.cacheWrite;
   return { ...sum, total, hitPct: total > 0 ? Math.round((sum.cacheRead / total) * 100) : 0 };
 }
 
 function print(label, results) {
   console.log(`\n──── ${label} ────`);
   for (const r of results) {
-    const total = r.input + r.cacheRead;
+    const total = r.input + r.cacheRead + r.cacheWrite;
     const hp = total > 0 ? Math.round((r.cacheRead / total) * 100) : 0;
     console.log(`  T${String(r.turn).padStart(2)}:  i=${String(r.input).padStart(6)}  r=${String(r.cacheRead).padStart(6)}  w=${String(r.cacheWrite).padStart(6)}  tot=${String(total).padStart(6)}  ${hp}%`);
   }

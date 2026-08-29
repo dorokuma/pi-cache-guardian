@@ -34,11 +34,11 @@ Pi Agent 有完善的事件系统和扩展 API，但默认没有针对 provider 
 
 ### 6. 缓存守护
 
-`PI_CACHE_GUARD=1` 时，session 结束时聚合命中率低于阈值（默认 90%）则发出警告。
+`PI_CACHE_GUARD=1` 时，session 结束时聚合命中率低于阈值（默认 90%）则发出警告。修正后虚高消失，`PI_CACHE_GUARD` 默认 90% 阈值可能比以前更常告警，属预期。
 
 ### 7. 缓存统计
 
-每轮自动记录 `cacheRead`/`cacheWrite`/`input`，`/cache-guardian` 命令查看完整统计。
+每轮自动记录 `cacheRead`/`cacheWrite`/`input`，`/cache-guardian` 命令查看完整统计。Pi 的 `usage.input` 在所有 API 下均为净输入（不含 cache），命中率一律按 `cacheRead / (input + cacheRead + cacheWrite)` 计算，与 Prism 的 `prompt_tokens` 口径等价。多轮聚合按 `sum(cacheRead) / sum(每轮分母)` 累计。
 
 ## 安装
 

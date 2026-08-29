@@ -1,6 +1,6 @@
 {
   "name": "pi-cache-guardian",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "description": "Pi Agent extension that maximizes prompt-cache hit rate and reduces token cost",
   "keywords": [
     "pi-package",
@@ -37,5 +37,7 @@
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=0.84.0"
   },
-  "scripts": {}
+  "scripts": {
+    "test": "node test/cache-guardian.mjs && node test/hit-rate.mjs"
+  }
 }
