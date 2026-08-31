@@ -128,15 +128,15 @@ import { truncateFooter, formatHerdsmanStatus, formatWindowSize } from "../exten
   assert.equal(formatWindowSize(-1000), "-1000");
 
   // 7b. Herdsman status formatting tests
-  // With numeric results -> "N UP"
-  assert.equal(formatHerdsmanStatus("◆ Herdsman · 1 agent update"), "1 UP");
-  assert.equal(formatHerdsmanStatus("◆ Herdsman · 2 agent updates"), "2 UP");
-  assert.equal(formatHerdsmanStatus("◆ Herdsman · 3 agent updates"), "3 UP");
-  assert.equal(formatHerdsmanStatus("Shepherd · 2 agent updates"), "2 UP");
-  assert.equal(formatHerdsmanStatus("1 agent update"), "1 UP");
-  assert.equal(formatHerdsmanStatus("2 updates"), "2 UP");
-  assert.equal(formatHerdsmanStatus("1 UP"), "1 UP");
-  assert.equal(formatHerdsmanStatus("5"), "5 UP");
+  // With numeric results -> "N Up"
+  assert.equal(formatHerdsmanStatus("◆ Herdsman · 1 agent update"), "1 Up");
+  assert.equal(formatHerdsmanStatus("◆ Herdsman · 2 agent updates"), "2 Up");
+  assert.equal(formatHerdsmanStatus("◆ Herdsman · 3 agent updates"), "3 Up");
+  assert.equal(formatHerdsmanStatus("Shepherd · 2 agent updates"), "2 Up");
+  assert.equal(formatHerdsmanStatus("1 agent update"), "1 Up");
+  assert.equal(formatHerdsmanStatus("2 updates"), "2 Up");
+  assert.equal(formatHerdsmanStatus("1 UP"), "1 Up");
+  assert.equal(formatHerdsmanStatus("5"), "5 Up");
   // Running with no return results -> returns "On"
   assert.equal(formatHerdsmanStatus("◆ Herdsman"), "On");
   assert.equal(formatHerdsmanStatus("Herdsman"), "On");
@@ -150,8 +150,8 @@ import { truncateFooter, formatHerdsmanStatus, formatWindowSize } from "../exten
   const dummyTheme = {
     fg: (style, text) => (style === "dim" ? `\x1b[2m${text}\x1b[22m` : text),
   };
-  // 1. Running with 2 results: ● 2 UP | ◆ 85% | ▲ 42%/1M | ■ deepseek-v4-flash
-  const fullLine = "\x1b[2m●\x1b[22m 2 UP \x1b[2m|\x1b[22m \x1b[2m◆\x1b[22m 85% \x1b[2m|\x1b[22m \x1b[2m▲\x1b[22m 42%/1M \x1b[2m|\x1b[22m \x1b[2m■\x1b[22m deepseek-v4-flash";
+  // 1. Running with 2 results: ● 2 Up | ◆ 85% | ▲ 42%/1M | ■ deepseek-v4-flash
+  const fullLine = "\x1b[2m●\x1b[22m 2 Up \x1b[2m|\x1b[22m \x1b[2m◆\x1b[22m 85% \x1b[2m|\x1b[22m \x1b[2m▲\x1b[22m 42%/1M \x1b[2m|\x1b[22m \x1b[2m■\x1b[22m deepseek-v4-flash";
   const fullWidth = visibleWidth(fullLine);
 
   // 2. Running without results: ● On | ◆ 85% | ▲ 42%/1M | ■ deepseek-v4-flash

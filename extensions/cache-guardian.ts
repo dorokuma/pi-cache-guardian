@@ -136,7 +136,7 @@ function sheepMeat(s: string): string {
 }
 /**
  * Format shepherd/herdsman status for footer.
- * When agents have returned results (completed awaiting acceptance), returns compact "[count] UP".
+ * When agents have returned results (completed awaiting acceptance), returns compact "[count] Up".
  * When running without return results, returns "On".
  * When herdsman is not loaded or not running (empty/undefined/whitespace), returns null.
  */
@@ -145,7 +145,7 @@ export function formatHerdsmanStatus(s: string | undefined): string | null {
   const meat = sheepMeat(s);
   const match = meat.match(/(\d+)\s*(?:agent\s*)?(?:updates?|completed|done|UP)\b/i) || meat.match(/^(\d+)$/);
   if (match) {
-    return `${match[1]} UP`;
+    return `${match[1]} Up`;
   }
   return "On";
 }
