@@ -134,6 +134,48 @@ function modelKey(m: any): string { return m ? `${m.provider}/${m.id}` : "unknow
 function sheepMeat(s: string): string {
   return s.replace(/^\s*[◆◇●▲■]?\s*(?:(?:Shepherd|Herdsman)(?:\s*[·•|｜]\s*)?)/i, "").trim();
 }
+/**
+ * Format shepherd/herdsman status for footer.
+ * When agents have returned results (completed awaiting acceptance), returns compact "[count] UP".
+ * When running without return results, returns "On".
+ * When herdsman is not loaded or not running (empty/undefined/whitespace), returns null.
+ */
+export function formatHerdsmanStatus(s: string | undefined): string | null {
+  if (!s || s.trim() === "") return null;
+  const meat = sheepMeat(s);
+  const match = meat.match(/(\d+)\s*(?:agent\s*)?(?:updates?|completed|done|UP)\b/i) || meat.match(/^(\d+)$/);
+  if (match) {
+    return `${match[1]} UP`;
+  }
+  return "On";
+}
+
+/**
+ * Format context window size to compact string:
+ * - Divisible by 1,048,576 (2^20) -> N + "M" (e.g. 1048576 -> 1M, 2097152 -> 2M)
+ * - Divisible by 1,000,000 (10^6) -> N + "M" (e.g. 1000000 -> 1M)
+ * - Divisible by 1,000 (10^3) -> N + "K" (e.g. 500000 -> 500K, 128000 -> 128K)
+ * - Divisible by 1,024 (2^10) -> N + "K" (e.g. 524288 -> 512K, 131072 -> 128K)
+ * - Otherwise raw number string (e.g. 999 -> 999)
+ */
+export function formatWindowSize(size: number): string {
+  if (typeof size !== "number" || !Number.isFinite(size) || size <= 0) {
+    return String(size);
+  }
+  if (size % 1_048_576 === 0) {
+    return `${size / 1_048_576}M`;
+  }
+  if (size % 1_000_000 === 0) {
+    return `${size / 1_000_000}M`;
+  }
+  if (size % 1_000 === 0) {
+    return `${size / 1_000}K`;
+  }
+  if (size % 1_024 === 0) {
+    return `${size / 1_024}K`;
+  }
+  return String(size);
+}
 /** Strip trailing " (provider)" from model display names; leave inner parens intact. */
 function stripProvider(name: string): string {
   return name.replace(/ \([^)]*\)$/, "");
@@ -165,22 +207,24 @@ function installFooter(ui: any) {
     return {
       render(width: number): string[] {
         const parts: string[] = [];
-        // 1. shepherd/herdsman status (only if set) — icon ●
+        // 1. shepherd/herdsman status (only if results returned) — icon ●
         const statuses = footerData.getExtensionStatuses();
         const sheep = statuses.get("herdsman") ?? statuses.get("shepherd");
-        if (sheep) {
-          const meat = sheepMeat(sheep);
-          parts.push(`${theme.fg("dim", FOOTER_ICON.sheep)} ${theme.fg("text", meat || "Herdsman")}`);
+        const herdsmanStatus = formatHerdsmanStatus(sheep);
+        if (herdsmanStatus) {
+          parts.push(`${theme.fg("dim", FOOTER_ICON.sheep)} ${theme.fg("text", herdsmanStatus)}`);
         }
         // 2. cache hit rate (session cumulative) — icon ◆
         const hit = aggregateHit(snapshot.totalCacheRead, snapshot.totalHitDenom);
         const hitStr = hit === null ? theme.fg("dim", "n/a") : theme.fg("text", `${hit}%`);
         parts.push(`${theme.fg("dim", FOOTER_ICON.hit)} ${hitStr}`);
-        // 3. context usage — icon ▲ (percent only)
+        // 3. context usage — icon ▲ (percent/compact contextWindow)
         const cu = footerContext;
-        const ctxStr = cu && cu.percent !== null
-          ? theme.fg("text", `${Math.round(cu.percent)}%`)
-          : theme.fg("dim", "n/a");
+        const ctxStr = cu && cu.percent !== null && cu.contextWindow
+          ? theme.fg("text", `${Math.round(cu.percent)}%/${formatWindowSize(cu.contextWindow)}`)
+          : cu && cu.percent !== null
+            ? theme.fg("text", `${Math.round(cu.percent)}%`)
+            : theme.fg("dim", "n/a");
         parts.push(`${theme.fg("dim", FOOTER_ICON.context)} ${ctxStr}`);
         // 4. model name + thinking level — icon ■ (single segment, merged)
         if (footerModelName) {

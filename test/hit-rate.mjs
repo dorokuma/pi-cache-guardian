@@ -98,16 +98,69 @@ import { cacheHitDenom, cacheHitPct, aggregateHit } from "../extensions/cache-gu
   assert.equal(aggHit, 78);
 }
 
-// 7. Footer truncation verification
+// 7. Footer formatting & truncation verification
 import { visibleWidth, stripTerminalSequences } from "@earendil-works/pi-tui";
-import { truncateFooter } from "../extensions/cache-guardian.ts";
+import { truncateFooter, formatHerdsmanStatus, formatWindowSize } from "../extensions/cache-guardian.ts";
 
 {
+  // 7a. formatWindowSize tests
+  // Binary powers
+  assert.equal(formatWindowSize(1048576), "1M");
+  assert.equal(formatWindowSize(2097152), "2M");
+  assert.equal(formatWindowSize(524288), "512K");
+  assert.equal(formatWindowSize(131072), "128K");
+  assert.equal(formatWindowSize(65536), "64K");
+
+  // Decimal powers / multiples
+  assert.equal(formatWindowSize(1000000), "1M");
+  assert.equal(formatWindowSize(2000000), "2M");
+  assert.equal(formatWindowSize(500000), "500K");
+  assert.equal(formatWindowSize(128000), "128K");
+  assert.equal(formatWindowSize(1500000), "1500K");
+  assert.equal(formatWindowSize(1000), "1K");
+
+  // Non-divisible boundaries & edge cases
+  assert.equal(formatWindowSize(1000001), "1000001");
+  assert.equal(formatWindowSize(999999), "999999");
+  assert.equal(formatWindowSize(999), "999");
+  assert.equal(formatWindowSize(1001), "1001");
+  assert.equal(formatWindowSize(0), "0");
+  assert.equal(formatWindowSize(-1000), "-1000");
+
+  // 7b. Herdsman status formatting tests
+  // With numeric results -> "N UP"
+  assert.equal(formatHerdsmanStatus("◆ Herdsman · 1 agent update"), "1 UP");
+  assert.equal(formatHerdsmanStatus("◆ Herdsman · 2 agent updates"), "2 UP");
+  assert.equal(formatHerdsmanStatus("◆ Herdsman · 3 agent updates"), "3 UP");
+  assert.equal(formatHerdsmanStatus("Shepherd · 2 agent updates"), "2 UP");
+  assert.equal(formatHerdsmanStatus("1 agent update"), "1 UP");
+  assert.equal(formatHerdsmanStatus("2 updates"), "2 UP");
+  assert.equal(formatHerdsmanStatus("1 UP"), "1 UP");
+  assert.equal(formatHerdsmanStatus("5"), "5 UP");
+  // Running with no return results -> returns "On"
+  assert.equal(formatHerdsmanStatus("◆ Herdsman"), "On");
+  assert.equal(formatHerdsmanStatus("Herdsman"), "On");
+  assert.equal(formatHerdsmanStatus("◇ Herdsman · reconnecting"), "On");
+  assert.equal(formatHerdsmanStatus("Shepherd"), "On");
+  // Not running / empty / undefined / pure whitespace -> returns null (not displayed)
+  assert.equal(formatHerdsmanStatus(""), null);
+  assert.equal(formatHerdsmanStatus("   "), null);
+  assert.equal(formatHerdsmanStatus(undefined), null);
+
   const dummyTheme = {
     fg: (style, text) => (style === "dim" ? `\x1b[2m${text}\x1b[22m` : text),
   };
-  const fullLine = "\x1b[2m●\x1b[22m Herdsman \x1b[2m|\x1b[22m \x1b[2m◆\x1b[22m 85% \x1b[2m|\x1b[22m \x1b[2m▲\x1b[22m 42% \x1b[2m|\x1b[22m \x1b[2m■\x1b[22m deepseek-v4-flash";
+  // 1. Running with 2 results: ● 2 UP | ◆ 85% | ▲ 42%/1M | ■ deepseek-v4-flash
+  const fullLine = "\x1b[2m●\x1b[22m 2 UP \x1b[2m|\x1b[22m \x1b[2m◆\x1b[22m 85% \x1b[2m|\x1b[22m \x1b[2m▲\x1b[22m 42%/1M \x1b[2m|\x1b[22m \x1b[2m■\x1b[22m deepseek-v4-flash";
   const fullWidth = visibleWidth(fullLine);
+
+  // 2. Running without results: ● On | ◆ 85% | ▲ 42%/1M | ■ deepseek-v4-flash
+  const onLine = "\x1b[2m●\x1b[22m On \x1b[2m|\x1b[22m \x1b[2m◆\x1b[22m 85% \x1b[2m|\x1b[22m \x1b[2m▲\x1b[22m 42%/1M \x1b[2m|\x1b[22m \x1b[2m■\x1b[22m deepseek-v4-flash";
+  assert.equal(truncateFooter(onLine, 100, dummyTheme), onLine);
+
+  // 3. Herdsman not running: herdsman hidden, ◆ 85% | ▲ 42%/1M | ■ deepseek-v4-flash
+  const notRunningLine = "\x1b[2m◆\x1b[22m 85% \x1b[2m|\x1b[22m \x1b[2m▲\x1b[22m 42%/1M \x1b[2m|\x1b[22m \x1b[2m■\x1b[22m deepseek-v4-flash";
+  assert.equal(truncateFooter(notRunningLine, 100, dummyTheme), notRunningLine);
 
   // Ample width
   const wide = truncateFooter(fullLine, 100, dummyTheme);
@@ -140,4 +193,5 @@ import { truncateFooter } from "../extensions/cache-guardian.ts";
 }
 
 console.log("All hit-rate and footer tests passed!");
+
 
