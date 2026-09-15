@@ -2,43 +2,61 @@
 
 English · [中文文档](./README.zh-CN.md)
 
-A Pi Agent extension that maximizes prompt-cache hit rate and reduces token cost.
+A Pi Agent extension that **observes** prompt-cache hit rate and optionally applies conservative, opt-in helpers. It does **not** freeze, reorder, or strip the system prompt by default.
 
-Pi Agent has a solid event system and extension API, but does not optimize for provider prompt caching by default. When multiple extensions inject content into the system prompt via `before_agent_start`, byte-level drift in the system prompt breaks the cache prefix entirely — measured in practice as a drop from 75% to 0%.
-
-`cache-guardian` solves this and consolidates the cache optimization techniques from pi-cache-optimizer and DeepSeek-Reasonix into a single extension.
+Pi Agent has a solid event system and extension API. Provider prompt caching still depends on a stable rendered prefix, provider routing, TTL, and workload. This extension records usage with Pi's net-input formula and can show a compact TUI footer. It does not claim to create caching where the provider already has none, and it does not silently drop new system rules, skills, or project-instruction boundaries.
 
 ## How it works
 
-### 1. Golden freeze (most important)
+### 1. Safe observation (default)
 
-The system prompt, after full chained processing on the first turn, is captured as a golden copy. Every subsequent turn it is unconditionally restored to the golden copy, guaranteeing byte-identical system prompts across the session.
+Each factory instance keeps its own stats, enable flag, footer handle, and unclassified-400 list. There is **no module-global golden prompt** and **no rollback of `systemPrompt`**.
 
-### 2. Prompt reorder
+On every turn the incoming `systemPrompt` is kept unless you explicitly opt into lossless skill XML compaction. New tools, resource discovery, prior-extension rules, and later-extension edits all remain visible to the model.
 
-The most stable content in the system prompt (custom prompt, tool snippets, guidelines, context files, skill index) is lifted to the front. Provider prefix caches match from the start, so the longer the stable content at the front, the higher the hit rate.
+`session_start` (new / resume / fork / switch / reload) resets **this instance's current-run** counters. Historical session custom entries are not replayed.
 
-### 3. Skill compression
+### 2. Optional lossless skill compact
 
-With 4 or more skills, Pi's 4-line XML block per skill (`<name>`/`<description>`/`<location>`) is compressed into a one-line index. With 31 skills this reduces ~13.3 KB to ~1 KB while preserving model discoverability.
+With `PI_CACHE_GUARD_SKILL_COMPACT=1`, a recognized Pi `<available_skills>` verbose listing may be rewritten to a denser XML form that still includes **name, description, real `filePath`**, visibility (hidden skills stay hidden), and the original read/bash loading prologue. Unknown, duplicate, or mismatched templates are passed through. Paths are never inferred as `root/name/SKILL.md`.
 
-### 4. Session-overview churn strip
+This is format-only. It is not a measured token-savings guarantee.
 
-Removes per-turn changing fields in trellis's `<session-overview>` (RECENT COMMITS, Working directory status, Line count), so the remaining fields become a cache-friendly prefix.
+### 3. Explicit legacy retention strip (optional)
 
-### 5. Automatic compatibility detection
+`PI_CACHE_GUARD_STRIP_RETENTION=1` deletes only the legacy OpenAI-style `prompt_cache_retention` field from the outgoing payload. It is off by default, does nothing while the instance is disabled, and is **not** Anthropic `cache_control.ttl` or OpenAI `prompt_cache_options`.
 
-- Records a 400 response for cache parameters with status/headers only and reports the reason as unknown; the extension API does not expose the response body, so it cannot safely classify the rejected parameter.
-- Anthropic cache compatibility remains based on the same status/headers-only signal; no cache retention is disabled from an unproven body claim.
-- Injects `prompt_cache_key` (OpenAI-compatible endpoints)
+The extension does **not** insert or overwrite `prompt_cache_key`, does **not** rewrite tools/messages/system TTL, and does **not** change `PI_CACHE_RETENTION` on import, enable, or disable.
 
-### 6. Cache guard
+### 4. Unclassified 400s
 
-With `PI_CACHE_GUARD=1`, a warning is emitted at session end if the aggregate hit rate falls below the threshold (default 90%). With the unified net input denominator, inflated hit rates (>100%) are eliminated; as a result, `PI_CACHE_GUARD` (default threshold 90%) may trigger warnings more frequently than before, which is expected.
+A 400 with only status/headers is recorded as unknown. Subsequent cache strategy is **unchanged**. The extension API does not expose the response body, so the rejected parameter is not guessed.
 
-### 7. Cache statistics
+### 5. Cache guard
 
-Per-turn `cacheRead`/`cacheWrite`/`input` is recorded automatically; the `/cache-guardian` command shows full statistics. Pi's `usage.input` is net input tokens across all APIs, so cache hit rates are uniformly computed as `cacheRead / (input + cacheRead + cacheWrite)`, equivalent to Prism's `prompt_tokens` denominator. Multi-turn aggregation computes `sum(cacheRead) / sum(denom)`.
+With `PI_CACHE_GUARD=1`, a warning is emitted at session end if the aggregate hit rate falls below the threshold (default 90%). Disabled instances do not warn.
+
+### 6. Cache statistics
+
+Per-turn `cacheRead` / `cacheWrite` / `input` is recorded while enabled. `/cache-guardian` shows totals. Pi's `usage.input` is net input tokens across all APIs, so hit rate is `cacheRead / (input + cacheRead + cacheWrite)`. Multi-turn aggregation is `sum(cacheRead) / sum(denom)`. Per-turn detail is bounded; cumulative totals are not discarded.
+
+String length in diagnostics is **character count**, not UTF-8 bytes. Dividing by 4 is a rough estimate, not an exact token count.
+
+### 7. Prefix-change diagnostics (default on, read-only)
+
+At this extension's `before_provider_request` hook, a **snapshot of the current payload** is compared with the previous snapshot for the same instance + session + provider + API + model + endpoint. Endpoint isolation fingerprints the full `baseUrl` string in memory with a per-instance salt (protocol, host/port, path, query, and userinfo differences are kept, never printed). That fingerprint is not evidence of real backend routing. It reports only fixed categories (`system` / `developer` / `instructions` / `tools`) plus status (`baseline` / `stable` / `changed` / `unknown` / `skipped` / `disabled`) and length or count. Empty sections are distinct from missing or oversize sections; missing or oversize is never labeled stable. Tool-array order is compared as sent (not sorted). Untrusted payload fields are read only as own data properties: accessors are not evaluated, `Proxy` objects are skipped via Node `util.types.isProxy` without running traps, and payload `Symbol.iterator` / `toJSON` are not executed. History `user` / `assistant` / `tool` bodies are not read when diagnosing `system` / `developer` (role/type/position metadata only). Host `ctx` / `model` / `sessionManager.getSessionId` are called by contract; a host throw skips that observation, does not change the request, and does not leak the exception text. Variable strings that enter walking, fingerprinting, concatenation, or scope formation (including field names) are charged against explicit length and total-character budgets before expensive work; oversize or unsafe observations are never labeled stable. These are JSON-like observation limits, not a sandbox against arbitrary JavaScript.
+
+Required identity must be present as non-empty strings within the length caps (ctx, model provider/api/id, session id, baseUrl). If any of those cannot be trusted, the observation is `skipped`, **no** scope summary is stored, and the comparison chain (max 8) is cleared so the next valid context starts at `baseline`. Missing/empty/non-string values are not coerced into a shared blank key or `endpoint:none`. Oversize or unsupported **payload** inside an already-known scope still breaks that scope only.
+
+Section fingerprints keep request shape, string vs block-array representation, target-message count/order/original index/role, and content-block type/boundary/order. Each chunk mixes a fixed-width 32-bit UTF-16 length (low 16 bits, then high 16 bits, including a zero high half) before the code units; the separator stays `mix(31)`. That digest is internal and non-authenticating: fixing length aliasing is not a proof that a bounded hash has no other collisions, and values are not persisted or used as a cache key. The recognized shape (`openai-chat` / `openai-responses` / `anthropic`) is stored as a bounded primitive on the comparison snapshot: two comparable snapshots in the same scope with different shapes are `changed`. Shape is not folded into `scopeKey` and is not inferred by rewriting `ctx.model.api`. Joined text is not the comparison key. Appending history after the last target message, or changing non-target bodies, does not by itself mark instructions `changed`. Mixed exclusive own fields (`messages` together with `input` or `instructions`, including `input` as string / empty string / null / own `undefined`) are `unknown` rather than dropping a field for a partial `stable`. Anthropic `system`+`messages` and Responses `instructions`+`input` (array or string) stay legal. `unknown` / `skipped` are not compared as a shape change; the next valid context is `baseline`. Vendor or model names are not used to guess the protocol.
+
+This is **not** a cache-invalidation verdict, a hit-rate, or a token-savings number. It is **not** the final HTTP body (later extensions can still change the payload) and **not** the provider's token prefix or cache state. Character counts are not tokens. Stable comparable fields do **not** mean the full conversation was frozen. Offline CPU improvements are not cache hits or bill savings.
+
+Known shapes are detected from payload structure used by this machine's Pi SDK (OpenAI chat `messages` system/developer, OpenAI Responses `instructions` / `input` system/developer, Anthropic `system` + `tools`). History, reasoning, and tool results are not collected. If **exactly one** well-formed unique Pi tagged block can be recognized inside already-extracted system text, an extra length summary is shown. Supported tag-like forms are only: exact `<project_instructions>` / `</project_instructions>`, or `<project_instructions` then ASCII whitespace (space/tab/LF/CR) plus attributes then `>`; and exact `<available_skills>` / `</available_skills>` (no attributes). The scan requires a single open-then-close pair in that order: a leading, between-block, or trailing isolated close, a second open, nesting, truncation, or an unsupported name suffix (`.` / `:` / non-ASCII / other) stays unidentified and is not claimed as a complete target block. This is not general XML. The extras scanner is a linear forward scan, not a backtracking regex, and does not rewrite the prompt.
+
+Turn off with `PI_CACHE_GUARDIAN_PREFIX_DIAGNOSTICS=0`. `/cache-guardian disable` and `reset` / `session_start` also stop updates and clear comparison state. Unknown or unsafe payloads are passed through unchanged. Observation never inserts cache keys, TTL, or retention, and never mutates the request object in default mode. Unclassified-400 and stats lines that embed provider/model fragments are control-character-sanitized and length-bounded for display only; cleaned text is not used as an identity key.
+
+Pi-native provider behavior stays first. Unknown endpoints keep host/user configuration. This tree does not hard-code a vendor capability table, and offline tests are not evidence of server-side caching or bill savings.
 
 ## Install
 
@@ -53,7 +71,7 @@ Pi auto-installs and loads it. No settings changes required.
 ### Direct copy
 
 ```bash
-git clone https://github.com/icefairy/pi-cache-guardian.git
+git clone https://github.com/dorokuma/pi-cache-guardian.git
 cp pi-cache-guardian/extensions/cache-guardian.ts ~/.pi/agent/extensions/
 ```
 
@@ -61,56 +79,74 @@ cp pi-cache-guardian/extensions/cache-guardian.ts ~/.pi/agent/extensions/
 
 | Variable | Default | Description |
 | ---------- | --------- | ------------- |
-| `PI_CACHE_GUARD_VERBOSE` | `0` | Print per-turn cache stats to stderr (console.error) |
+| `PI_CACHE_GUARD_VERBOSE` | `0` | Extra diagnostic logs to stderr |
 | `PI_CACHE_GUARD` | `0` | Enable cache guard warning at session end |
 | `PI_CACHE_GUARD_THRESHOLD` | `90` | Cache guard hit-rate threshold |
-| `PI_CACHE_GUARD_NO_SKILL_COMPRESSION` | `0` | Disable skill compression |
-| `PI_CACHE_GUARD_NO_PROMPT_REWRITE` | `0` | Disable prompt reorder (freeze only) |
-| `PI_CACHE_GUARD_STRIP_RETENTION` | `0` | Proactively strip `prompt_cache_retention` from all requests (no 400 needed) |
-| `PI_CACHE_GUARD_FOOTER` | enabled | Custom footer is enabled by default; set to `0` or `false` to disable |
-| `PI_CACHE_NO_OPENAI_CACHE_KEY` | `0` | Disable OpenAI `prompt_cache_key` injection when set to `1`, `true`, `yes`, or `on` |
-| `PI_CACHE_OPENAI_CACHE_KEY` | enabled | Disable OpenAI `prompt_cache_key` injection by setting to `0` or `false` |
-| `PI_CACHE_RETENTION` | `long` at module load | The extension sets this to `long` when loaded; `/cache-guardian disable` restores the startup baseline for the current process |
+| `PI_CACHE_GUARD_SKILL_COMPACT` | `0` | Opt-in lossless compact of a recognized skills XML listing |
+| `PI_CACHE_GUARD_STRIP_RETENTION` | `0` | Delete legacy `prompt_cache_retention` only (not Anthropic TTL / `prompt_cache_options`) |
+| `PI_CACHE_GUARD_FOOTER` | enabled | Custom footer on by default in TUI; `0` / `false` disables it |
+| `PI_CACHE_GUARDIAN_PREFIX_DIAGNOSTICS` | enabled | Read-only prefix-change snapshot at this extension hook; `0` / `false` / `off` / `no` disables it |
 
-> **Note:** The `compactionCacheLoss` field was removed. The Pi extension API has no reliable compaction event to accumulate it. Cache loss due to compaction is not tracked.
+#### Deprecated (no-ops; do not restore old dangerous behavior)
+
+| Variable | Notes |
+| ---------- | ----- |
+| `PI_CACHE_GUARD_NO_PROMPT_REWRITE` | Prompt rewrite/freeze is already off. Setting this does **not** re-enable golden rollback. |
+| `PI_CACHE_GUARD_NO_SKILL_COMPRESSION` | Lossy compression is gone. Compact happens only with `PI_CACHE_GUARD_SKILL_COMPACT=1`. |
+| `PI_CACHE_NO_OPENAI_CACHE_KEY` / `PI_CACHE_OPENAI_CACHE_KEY` | The extension no longer injects or overwrites `prompt_cache_key`. |
+| `PI_CACHE_RETENTION` | Not set or restored by this extension. Configure long retention on the host/user side if you want it. |
+
+> **Note:** The `compactionCacheLoss` field was removed. The Pi extension API has no reliable compaction event to accumulate it.
 
 ## Commands
 
 ```
-/cache-guardian          # Show current session cache statistics
-/cache-guardian disable  # Disable extension (current process; restored on restart)
-/cache-guardian enable   # Re-enable
-/cache-guardian reset    # Reset all statistics and compatibility state
+/cache-guardian          # Show current-run cache statistics (includes a short prefix-status line)
+/cache-guardian prefix   # Show the latest prefix-change snapshot (categories/status/lengths only)
+/cache-guardian disable  # Disable this instance (no stats writes, no footer, no payload edits, no prefix updates)
+/cache-guardian enable   # Re-enable (footer only if TUI and FOOTER is on)
+/cache-guardian reset    # Reset current-run statistics, unclassified 400 list, and prefix comparison state; refresh footer
 ```
 
-## Measured results
+## Tests
 
-### Method
+```bash
+npm test
+```
 
-A 10-turn read-file conversation on `agentrium/deepseek-v4-flash`, with compaction and retry disabled. The same script runs with and without the extension, extracting `cacheRead`/`cacheWrite`/`input` from each turn's assistant message `usage` field.
+`npm test` is offline: it loads the extension, drives Pi events, runs an isolated AgentSession tool-set path, and self-checks comparison helpers. It does not read `~/.pi/agent`, user credentials, or call a model API.
 
-### Aggregates
+To exercise the host SDK instead of the project pin (0.84.2):
+
+```bash
+PI_CACHE_GUARD_TEST_SDK=/path/to/@earendil-works/pi-coding-agent npm test
+```
+
+A real network A/B is **opt-in only** (never part of `npm test`):
+
+```bash
+PI_CACHE_GUARD_BENCH=1 \
+PI_CACHE_GUARD_BENCH_PROVIDER=... \
+PI_CACHE_GUARD_BENCH_MODEL=... \
+PI_CACHE_GUARD_BENCH_AGENT_DIR=/explicit/isolated/agent-dir \
+node test/comparison.mjs
+```
+
+See [docs/testing-methodology.md](./docs/testing-methodology.md) and [docs/audit-remediation.md](./docs/audit-remediation.md).
+
+## Historical numbers (not re-verified)
+
+An older 10-turn read-file run on `agentrium/deepseek-v4-flash` reported:
 
 | Scenario | Uncached | Cache-read | Total input | Aggregate hit% |
 |----------|----------|------------|-------------|----------------|
 | Without | 5256 | 8192 | 13448 | 61% |
 | With | 3967 | 8192 | 12159 | 67% |
 
-### Stable segment (T3-T10, after cache warm-up)
-
-| Scenario | Per-turn uncached | Cache-read | Hit% |
-|----------|-------------------|------------|------|
-| Without | 341 | 1024 | 75% |
-| With | 201 | 1024 | 84% |
-
-### Improvement
-
-- Uncached tokens reduced by **1289 (25%)**
-- Stable-segment hit rate **+9 pts** (75% → 84%)
-- No functional regression
+**These figures are historical, not independently re-run in this tree, and are not a bill.** `cacheRead` was the same in both arms (8192), so they do **not** show a longer matched cache prefix. The lower uncached input can come from dropping or rewriting prompt text (behavior this version no longer does by default). Do not treat them as proof of universal savings or “no functional regression.” Attribution is limited: the old comparison script could load default `~/.pi/agent` extensions, counted only the last assistant `usage` per turn, and was not AB/BA isolated.
 
 ## References
 
-- DeepSeek-Reasonix: `TestReleaseCacheHitGuard` CI gate (90% threshold)
-- pi-cache-optimizer (jiangge): prompt reorder + skill compression + churn strip
-- Anthropic prompt caching: `cache_control: { type: "ephemeral" }` prefix matching
+- OpenAI Prompt caching: prefix matching, routing keys, retention, and cost
+- Anthropic Prompt caching: cache blocks, TTL, cost, and order constraints
+- DeepSeek Context caching: automatic prefix caching (best-effort)

@@ -1,7 +1,7 @@
 {
   "name": "pi-cache-guardian",
-  "version": "1.2.7",
-  "description": "Pi Agent extension that maximizes prompt-cache hit rate and reduces token cost",
+  "version": "1.3.0",
+  "description": "Pi Agent extension for prompt-cache observation and opt-in compatibility helpers",
   "keywords": [
     "pi-package",
     "pi",
@@ -11,7 +11,6 @@
     "cache",
     "prompt-cache",
     "kv-cache",
-    "optimizer",
     "deepseek",
     "openai",
     "claude"
@@ -39,6 +38,6 @@
     "@earendil-works/pi-tui": ">=0.84.0"
   },
   "scripts": {
-    "test": "node test/cache-guardian.mjs && node test/hit-rate.mjs"
+    "test": "node test/cache-guardian.mjs && node test/hit-rate.mjs && node test/agent-session.mjs && node test/comparison.mjs && node test/prefix-diagnostics.mjs && node test/prefix-r9-accessors.mjs && node test/prefix-r9-endpoint.mjs && node test/prefix-r9-budget.mjs && node test/prefix-r11-extras.mjs && node test/prefix-r11-extras-perf.mjs && node test/prefix-r11-scope.mjs && node test/prefix-r11-structure.mjs && node test/prefix-r11-notify.mjs && node test/prefix-r12-a1-tags.mjs && node test/prefix-r12-a2-order.mjs && node test/prefix-r12-b1-shape.mjs && node test/prefix-r12-b2-mixed.mjs && node test/prefix-r14-f1-content.mjs && node test/prefix-r14-f1-tools.mjs"
   }
 }

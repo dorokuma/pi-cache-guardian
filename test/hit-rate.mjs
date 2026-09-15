@@ -1,5 +1,8 @@
 import { strict as assert } from "node:assert";
 import { cacheHitDenom, cacheHitPct, aggregateHit } from "../extensions/cache-guardian.ts";
+import { isolateCacheEnv } from "./helpers.mjs";
+
+isolateCacheEnv();
 
 // 1. Real Pi data shape: promptTokens=1000, cached=800 -> Pi usage: {input: 200, cacheRead: 800, cacheWrite: 0}
 // Denominator = input + cacheRead + cacheWrite = 1000, hitRate = 800/1000 = 80%
