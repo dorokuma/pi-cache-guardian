@@ -38,6 +38,8 @@
     "@earendil-works/pi-tui": ">=0.84.0"
   },
   "scripts": {
-    "test": "node test/cache-guardian.mjs && node test/hit-rate.mjs && node test/agent-session.mjs && node test/comparison.mjs && node test/prefix-diagnostics.mjs && node test/prefix-r9-accessors.mjs && node test/prefix-r9-endpoint.mjs && node test/prefix-r9-budget.mjs && node test/prefix-r11-extras.mjs && node test/prefix-r11-extras-perf.mjs && node test/prefix-r11-scope.mjs && node test/prefix-r11-structure.mjs && node test/prefix-r11-notify.mjs && node test/prefix-r12-a1-tags.mjs && node test/prefix-r12-a2-order.mjs && node test/prefix-r12-b1-shape.mjs && node test/prefix-r12-b2-mixed.mjs && node test/prefix-r14-f1-content.mjs && node test/prefix-r14-f1-tools.mjs"
+    "test": "node test/cache-guardian.mjs && node test/hit-rate.mjs && node test/agent-session.mjs && node test/comparison.mjs && node test/prefix-diagnostics.mjs && node test/prefix-r9-accessors.mjs && node test/prefix-r9-endpoint.mjs && node test/prefix-r9-budget.mjs && node test/prefix-r11-extras.mjs && node test/prefix-r11-extras-perf.mjs && node test/prefix-r11-scope.mjs && node test/prefix-r11-structure.mjs && node test/prefix-r11-notify.mjs && node test/prefix-r12-a1-tags.mjs && node test/prefix-r12-a2-order.mjs && node test/prefix-r12-b1-shape.mjs && node test/prefix-r12-b2-mixed.mjs && node test/prefix-r14-f1-content.mjs && node test/prefix-r14-f1-tools.mjs",
+    "check": "tsc extensions/cache-guardian.ts --noEmit --module esnext --moduleResolution bundler --target esnext --skipLibCheck && pnpm test",
+    "build": "tsc extensions/cache-guardian.ts --noEmit --module esnext --moduleResolution bundler --target esnext --skipLibCheck"
   }
 }

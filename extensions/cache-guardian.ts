@@ -36,9 +36,91 @@ const PREFIX_MAX_SCOPE_CHARS = 16_384;
 // ── Pure cache hit rate helpers ──────────────────────────────────────────────
 export type CacheUsage = {
   input?: number;
+  output?: number;
   cacheRead?: number;
   cacheWrite?: number;
+  totalTokens?: number;
+  total?: number;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+  prompt_tokens_details?: {
+    cached_tokens?: number;
+    [key: string]: any;
+  };
+  cached_tokens?: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+  cache_write_input_tokens?: number;
+  prompt_cache_hit_tokens?: number;
+  prompt_cache_miss_tokens?: number;
+  [key: string]: any;
 };
+
+/**
+ * Normalize diverse provider usage payloads (Pi native, OpenAI prompt_tokens/completion_tokens/total_tokens,
+ * Anthropic cache details) to a consistent structure.
+ */
+export function normalizeUsage(u: any): {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  totalTokens: number;
+  total: number;
+} {
+  if (!u || typeof u !== "object") {
+    return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, total: 0 };
+  }
+  const cacheRead = Number(
+    u.cacheRead ??
+    u.prompt_tokens_details?.cached_tokens ??
+    u.cached_tokens ??
+    u.cache_read_input_tokens ??
+    u.prompt_cache_hit_tokens ??
+    0
+  ) || 0;
+
+  const cacheWrite = Number(
+    u.cacheWrite ??
+    u.cache_creation_input_tokens ??
+    u.cache_write_input_tokens ??
+    u.prompt_cache_miss_tokens ??
+    0
+  ) || 0;
+
+  const input = Number(
+    u.input ??
+    u.prompt_tokens ??
+    u.input_tokens ??
+    u.promptTokens ??
+    0
+  ) || 0;
+
+  const output = Number(
+    u.output ??
+    u.completion_tokens ??
+    u.output_tokens ??
+    u.completionTokens ??
+    0
+  ) || 0;
+
+  const totalTokens = Number(
+    u.totalTokens ??
+    u.total_tokens ??
+    u.total ??
+    (input + output + cacheRead + cacheWrite)
+  ) || (input + output + cacheRead + cacheWrite);
+
+  return {
+    input,
+    output,
+    cacheRead,
+    cacheWrite,
+    totalTokens,
+    total: totalTokens,
+  };
+}
 
 /**
  * Compute the aggregate percentage cache hit rate (0-100 rounded to integer).
@@ -64,9 +146,10 @@ export function cacheHitDenom(
   let cWrite = 0;
 
   if (typeof usageOrInput === "object" && usageOrInput !== null) {
-    input = usageOrInput.input ?? 0;
-    cRead = usageOrInput.cacheRead ?? 0;
-    cWrite = usageOrInput.cacheWrite ?? 0;
+    const norm = normalizeUsage(usageOrInput);
+    input = norm.input;
+    cRead = norm.cacheRead;
+    cWrite = norm.cacheWrite;
   } else {
     input = Number(usageOrInput) || 0;
     cRead = Number(cacheRead) || 0;
@@ -87,7 +170,8 @@ export function cacheHitPct(
 ): number | null {
   let cRead = 0;
   if (typeof usageOrInput === "object" && usageOrInput !== null) {
-    cRead = usageOrInput.cacheRead ?? 0;
+    const norm = normalizeUsage(usageOrInput);
+    cRead = norm.cacheRead;
   } else {
     cRead = Number(cacheRead) || 0;
   }
@@ -98,6 +182,7 @@ export function cacheHitPct(
 type TurnReport = {
   turn: number;
   input: number;
+  output?: number;
   cacheRead: number;
   cacheWrite: number;
   denom: number;
@@ -108,6 +193,7 @@ type Snapshot = {
   totalCacheRead: number;
   totalCacheWrite: number;
   totalInput: number;
+  totalOutput: number;
   totalHitDenom: number;
   turns: number;
 };
@@ -164,7 +250,7 @@ type InstanceState = {
 };
 
 function emptySnapshot(): Snapshot {
-  return { totalCacheRead: 0, totalCacheWrite: 0, totalInput: 0, totalHitDenom: 0, turns: 0 };
+  return { totalCacheRead: 0, totalCacheWrite: 0, totalInput: 0, totalOutput: 0, totalHitDenom: 0, turns: 0 };
 }
 
 function randomSalt(): Uint8Array {
@@ -345,7 +431,9 @@ function installFooter(state: InstanceState, ui: any): void {
           parts.push(`${theme.fg("dim", FOOTER_ICON.sheep)} ${theme.fg("text", herdsmanStatus)}`);
         }
         // 2. cache hit rate (session cumulative) — icon ◆
-        const hit = aggregateHit(state.snapshot.totalCacheRead, state.snapshot.totalHitDenom);
+        const hit = (state.snapshot.totalCacheRead === 0 && state.snapshot.totalCacheWrite === 0)
+          ? null
+          : aggregateHit(state.snapshot.totalCacheRead, state.snapshot.totalHitDenom);
         const hitStr = hit === null ? theme.fg("dim", "n/a") : theme.fg("text", `${hit}%`);
         parts.push(`${theme.fg("dim", FOOTER_ICON.hit)} ${hitStr}`);
         // 3. context usage — icon ▲ (percent/compact contextWindow)
@@ -1353,23 +1441,34 @@ export default function (pi: ExtensionAPI) {
   pi.on("agent_end", async (event, ctx) => {
     if (!state.runtimeEnabled) return;
     state.snapshot.turns += 1;
-    let cr = 0, cw = 0, inp = 0;
+    let cr = 0, cw = 0, inp = 0, outp = 0;
     for (const msg of event.messages ?? []) {
       // `usage` is only present on assistant messages; other message kinds in the
       // AgentMessage union (e.g. BashExecutionMessage) carry no usage field.
       if (msg.role !== "assistant" || !("usage" in msg) || !msg.usage) continue;
       const u = msg.usage;
-      inp += u.input ?? 0; cr += u.cacheRead ?? 0; cw += u.cacheWrite ?? 0;
+      const norm = normalizeUsage(u);
+      if (u.input === undefined) u.input = norm.input;
+      if (u.output === undefined) u.output = norm.output;
+      if (u.cacheRead === undefined) u.cacheRead = norm.cacheRead;
+      if (u.cacheWrite === undefined) u.cacheWrite = norm.cacheWrite;
+      if (u.totalTokens === undefined) u.totalTokens = norm.totalTokens;
+      if ((u as any).total === undefined) (u as any).total = norm.totalTokens;
+      inp += norm.input;
+      outp += norm.output;
+      cr += norm.cacheRead;
+      cw += norm.cacheWrite;
     }
     const denom = cacheHitDenom({ input: inp, cacheRead: cr, cacheWrite: cw });
     const hitPct = cacheHitPct({ input: inp, cacheRead: cr, cacheWrite: cw });
     state.snapshot.totalInput += inp;
+    state.snapshot.totalOutput += outp;
     state.snapshot.totalCacheWrite += cw;
     if (denom > 0) {
       state.snapshot.totalCacheRead += cr;
       state.snapshot.totalHitDenom += denom;
     }
-    state.turnReports.push({ turn: state.snapshot.turns, input: inp, cacheRead: cr, cacheWrite: cw, denom, hitPct });
+    state.turnReports.push({ turn: state.snapshot.turns, input: inp, output: outp, cacheRead: cr, cacheWrite: cw, denom, hitPct });
     if (state.turnReports.length > TURN_REPORT_LIMIT) {
       state.turnReports.splice(0, state.turnReports.length - TURN_REPORT_LIMIT);
     }
@@ -1388,7 +1487,9 @@ export default function (pi: ExtensionAPI) {
   // ── 5. session_shutdown: cache guard ──
   pi.on("session_shutdown", (_event, ctx) => {
     if (!state.runtimeEnabled || !guardEnabled || state.snapshot.turns === 0) return;
-    const agg = aggregateHit(state.snapshot.totalCacheRead, state.snapshot.totalHitDenom);
+    const agg = (state.snapshot.totalCacheRead === 0 && state.snapshot.totalCacheWrite === 0)
+      ? null
+      : aggregateHit(state.snapshot.totalCacheRead, state.snapshot.totalHitDenom);
     if (agg !== null && agg < guardThreshold) {
       ctx.ui.notify(`[${LOG}] Cache guard: aggregate=${agg}% < threshold=${guardThreshold}%. Check /cache-guardian stats.`, "warning");
     }
@@ -1465,10 +1566,14 @@ function showStats(
 ) {
   const snap = state.snapshot;
   const reports = state.turnReports;
-  const agg = aggregateHit(snap.totalCacheRead, snap.totalHitDenom);
+  const agg = (snap.totalCacheRead === 0 && snap.totalCacheWrite === 0)
+    ? null
+    : aggregateHit(snap.totalCacheRead, snap.totalHitDenom);
   const tail = reports.length >= 3
     ? (() => {
         const last3 = reports.slice(-3);
+        const hasCache = last3.some((r) => r.cacheRead > 0 || r.cacheWrite > 0);
+        if (!hasCache) return null;
         const tailDenom = last3.reduce((s, r) => s + (r.denom > 0 ? r.denom : 0), 0);
         const tailRead = last3.reduce((s, r) => s + (r.denom > 0 ? r.cacheRead : 0), 0);
         return aggregateHit(tailRead, tailDenom);
@@ -1482,7 +1587,7 @@ function showStats(
     `State: ${state.runtimeEnabled ? "enabled" : "disabled"}`,
     `Turns: ${snap.turns}`,
     `Aggregate hit: ${agg !== null ? agg + "%" : "n/a"}  (read=${snap.totalCacheRead} / denom=${snap.totalHitDenom})`,
-    `Cumulative: input=${snap.totalInput}  cacheRead=${snap.totalCacheRead}  cacheWrite=${snap.totalCacheWrite}`,
+    `Cumulative: input=${snap.totalInput}  output=${snap.totalOutput}  cacheRead=${snap.totalCacheRead}  cacheWrite=${snap.totalCacheWrite}`,
     `First-turn prompt: ${firstInfo}`,
     `Skill compact: ${skillCompact ? "on (lossless, recognized templates)" : "off"}`,
     `Strip prompt_cache_retention: ${stripRetention ? "on (legacy field only)" : "off"}`,
@@ -1495,7 +1600,10 @@ function showStats(
   }
   if (reports.length > 0) {
     lines.push("", `Per-turn (last ${reports.length}, bounded):`);
-    for (const r of reports) lines.push(`  T${r.turn}: i=${r.input} r=${r.cacheRead} w=${r.cacheWrite} ${r.hitPct !== null ? r.hitPct + "%" : "n/a"}`);
+    for (const r of reports) {
+      const turnHit = (r.cacheRead === 0 && r.cacheWrite === 0) ? "n/a" : (r.hitPct !== null ? r.hitPct + "%" : "n/a");
+      lines.push(`  T${r.turn}: i=${r.input} r=${r.cacheRead} w=${r.cacheWrite} ${turnHit}`);
+    }
   }
   for (const l of lines) ctx.ui.notify(escapeForNotify(l), "info");
 }

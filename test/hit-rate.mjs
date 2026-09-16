@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { cacheHitDenom, cacheHitPct, aggregateHit } from "../extensions/cache-guardian.ts";
+import { cacheHitDenom, cacheHitPct, aggregateHit, normalizeUsage } from "../extensions/cache-guardian.ts";
 import { isolateCacheEnv } from "./helpers.mjs";
 
 isolateCacheEnv();
@@ -193,6 +193,89 @@ import { truncateFooter, formatHerdsmanStatus, formatWindowSize } from "../exten
   const res = truncateFooter(plain, 10);
   assert.ok(visibleWidth(res) <= 10);
   assert.ok(stripTerminalSequences(res).endsWith("…") || stripTerminalSequences(res).endsWith("..."));
+}
+
+// 8. OpenAI style usage normalization and hit rate tests
+{
+  // 8a. Basic OpenAI format (prompt_tokens, completion_tokens, total_tokens) without cache
+  const openAiBasic = {
+    prompt_tokens: 1500,
+    completion_tokens: 300,
+    total_tokens: 1800,
+  };
+  const normBasic = normalizeUsage(openAiBasic);
+  assert.equal(normBasic.input, 1500);
+  assert.equal(normBasic.output, 300);
+  assert.equal(normBasic.totalTokens, 1800);
+  assert.equal(normBasic.total, 1800);
+  assert.equal(normBasic.cacheRead, 0);
+  assert.equal(normBasic.cacheWrite, 0);
+  assert.equal(cacheHitDenom(openAiBasic), 1500);
+  assert.equal(cacheHitPct(openAiBasic), 0);
+
+  // 8b. OpenAI format with prompt_tokens_details.cached_tokens
+  const openAiCached = {
+    prompt_tokens: 200,
+    completion_tokens: 100,
+    total_tokens: 1100,
+    prompt_tokens_details: {
+      cached_tokens: 800,
+    },
+  };
+  const normCached = normalizeUsage(openAiCached);
+  assert.equal(normCached.input, 200);
+  assert.equal(normCached.output, 100);
+  assert.equal(normCached.cacheRead, 800);
+  assert.equal(normCached.cacheWrite, 0);
+  assert.equal(normCached.totalTokens, 1100);
+  assert.equal(cacheHitDenom(openAiCached), 1000);
+  assert.equal(cacheHitPct(openAiCached), 80);
+
+  // 8c. OpenAI format with flat cached_tokens and cache_creation_input_tokens
+  const openAiMixed = {
+    prompt_tokens: 200,
+    completion_tokens: 50,
+    total_tokens: 1100,
+    cached_tokens: 800,
+    cache_creation_input_tokens: 50,
+  };
+  const normMixed = normalizeUsage(openAiMixed);
+  assert.equal(normMixed.input, 200);
+  assert.equal(normMixed.output, 50);
+  assert.equal(normMixed.cacheRead, 800);
+  assert.equal(normMixed.cacheWrite, 50);
+  assert.equal(cacheHitDenom(openAiMixed), 1050);
+  assert.equal(cacheHitPct(openAiMixed), 76);
+
+  // 8d. Standard Pi format preservation
+  const piNative = {
+    input: 200,
+    output: 100,
+    cacheRead: 800,
+    cacheWrite: 50,
+    totalTokens: 1150,
+  };
+  const normNative = normalizeUsage(piNative);
+  assert.equal(normNative.input, 200);
+  assert.equal(normNative.output, 100);
+  assert.equal(normNative.cacheRead, 800);
+  assert.equal(normNative.cacheWrite, 50);
+  assert.equal(normNative.totalTokens, 1150);
+
+  // 8e. Empty / null / undefined edge cases
+  const emptyNorm = normalizeUsage({});
+  assert.equal(emptyNorm.input, 0);
+  assert.equal(emptyNorm.output, 0);
+  assert.equal(emptyNorm.cacheRead, 0);
+  assert.equal(emptyNorm.cacheWrite, 0);
+  assert.equal(emptyNorm.totalTokens, 0);
+
+  const nullNorm = normalizeUsage(null);
+  assert.equal(nullNorm.input, 0);
+  assert.equal(nullNorm.output, 0);
+  assert.equal(nullNorm.cacheRead, 0);
+  assert.equal(nullNorm.cacheWrite, 0);
+  assert.equal(nullNorm.totalTokens, 0);
 }
 
 console.log("All hit-rate and footer tests passed!");

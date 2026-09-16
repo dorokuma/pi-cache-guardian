@@ -654,4 +654,130 @@ function compactableSkillSet() {
   ok("old 244e8c7 freeze is caught by F01 assertion");
 }
 
+// ── OpenAI style usage in agent_end (prompt_tokens / completion_tokens / total_tokens) ──
+{
+  const { ext, ctx } = await fresh();
+  const assistantMsg = {
+    role: "assistant",
+    usage: {
+      prompt_tokens: 1200,
+      completion_tokens: 300,
+      total_tokens: 1500,
+    },
+  };
+  await fire(ext, "agent_end", ctx, {
+    messages: [assistantMsg],
+  });
+
+  // Verify usage on message object was normalized
+  assert.equal(assistantMsg.usage.input, 1200);
+  assert.equal(assistantMsg.usage.output, 300);
+  assert.equal(assistantMsg.usage.cacheRead, 0);
+  assert.equal(assistantMsg.usage.cacheWrite, 0);
+  assert.equal(assistantMsg.usage.totalTokens, 1500);
+
+  // Check stats command output
+  ctx.notices.length = 0;
+  await ext.commands.get("cache-guardian").handler("", ctx);
+  const stats = ctx.notices.map((n) => n[0]).join("\n");
+  assert.match(stats, /input=1200/);
+  assert.match(stats, /output=300/);
+  assert.match(stats, /cacheRead=0/);
+  assert.match(stats, /cacheWrite=0/);
+  // Hit rate must be n/a when both cacheRead and cacheWrite are 0 (no fabricated 0%)
+  assert.match(stats, /Aggregate hit: n\/a/);
+  ok("OpenAI style usage parsed into input/output/total; hit rate remains n/a when no cache");
+}
+
+// ── OpenAI style usage with prompt_tokens_details.cached_tokens in agent_end ──
+{
+  const { ext, ctx } = await fresh();
+  const assistantMsg = {
+    role: "assistant",
+    usage: {
+      prompt_tokens: 200,
+      completion_tokens: 80,
+      total_tokens: 1080,
+      prompt_tokens_details: {
+        cached_tokens: 800,
+      },
+    },
+  };
+  await fire(ext, "agent_end", ctx, {
+    messages: [assistantMsg],
+  });
+
+  assert.equal(assistantMsg.usage.input, 200);
+  assert.equal(assistantMsg.usage.output, 80);
+  assert.equal(assistantMsg.usage.cacheRead, 800);
+  assert.equal(assistantMsg.usage.cacheWrite, 0);
+
+  ctx.notices.length = 0;
+  await ext.commands.get("cache-guardian").handler("", ctx);
+  const stats = ctx.notices.map((n) => n[0]).join("\n");
+  assert.match(stats, /input=200/);
+  assert.match(stats, /output=80/);
+  assert.match(stats, /cacheRead=800/);
+  assert.match(stats, /Aggregate hit: 80%/);
+  ok("OpenAI style cached_tokens parsed and aggregate hit rate computed correctly");
+}
+
+// ── Footer rendering with context usage and OpenAI usage ──
+{
+  let footerComponent = null;
+  const ctx = mockContext({
+    mode: "tui",
+    model: { id: "openai/gpt-4o", name: "GPT-4o (OpenAI)", contextWindow: 128000 },
+    getContextUsage: () => ({ tokens: 64000, contextWindow: 128000, percent: 50.0 }),
+    ui: {
+      notify: () => {},
+      setFooter: (factory) => {
+        if (typeof factory === "function") {
+          footerComponent = factory(
+            { requestRender: () => {} },
+            { fg: (_style, text) => text },
+            { getExtensionStatuses: () => new Map() },
+          );
+        }
+      },
+    },
+  });
+
+  const { ext } = await fresh(ctx);
+  // Turn 1: pure OpenAI usage without cache
+  await fire(ext, "agent_end", ctx, {
+    messages: [{
+      role: "assistant",
+      usage: { prompt_tokens: 1000, completion_tokens: 200, total_tokens: 1200 },
+    }],
+  });
+
+  assert.ok(footerComponent, "footer must be installed");
+  const rendered1 = footerComponent.render(120)[0];
+  // ◆ must be n/a because cacheRead=0 and cacheWrite=0
+  assert.match(rendered1, /◆ n\/a/);
+  // ▲ must display real percent and context window
+  assert.match(rendered1, /▲ 50%\/128K/);
+  assert.match(rendered1, /■ GPT-4o/);
+
+  // Turn 2: cache activity arrives
+  await fire(ext, "agent_end", ctx, {
+    messages: [{
+      role: "assistant",
+      usage: {
+        prompt_tokens: 200,
+        completion_tokens: 100,
+        total_tokens: 1100,
+        prompt_tokens_details: { cached_tokens: 800 },
+      },
+    }],
+  });
+
+  const rendered2 = footerComponent.render(120)[0];
+  // Cumulative: read=800, denom=1000+1000=2000 -> 40%
+  assert.match(rendered2, /◆ 40%/);
+  assert.match(rendered2, /▲ 50%\/128K/);
+  ok("Footer correctly shows ◆ n/a without cache and ▲ real context usage");
+}
+
 console.log(`All cache-guardian regressions passed (${passed} cases, sdk=${sdkVersion})`);
