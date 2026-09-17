@@ -232,9 +232,18 @@ type PrefixView = {
   extras: { project_rules: PrefixSection; skills_index: PrefixSection } | null;
 };
 
+type LiveRun = {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  hitDenom: number;
+};
+
 type InstanceState = {
   runtimeEnabled: boolean;
   snapshot: Snapshot;
+  liveRun: LiveRun;
   turnReports: TurnReport[];
   unknown400: Set<string>;
   firstPromptChars: number | null;
@@ -253,6 +262,10 @@ function emptySnapshot(): Snapshot {
   return { totalCacheRead: 0, totalCacheWrite: 0, totalInput: 0, totalOutput: 0, totalHitDenom: 0, turns: 0 };
 }
 
+function emptyLiveRun(): LiveRun {
+  return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, hitDenom: 0 };
+}
+
 function randomSalt(): Uint8Array {
   const s = new Uint8Array(16);
   if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
@@ -267,6 +280,7 @@ function createInstanceState(prefixDiagEnabled: boolean): InstanceState {
   return {
     runtimeEnabled: true,
     snapshot: emptySnapshot(),
+    liveRun: emptyLiveRun(),
     turnReports: [],
     unknown400: new Set<string>(),
     firstPromptChars: null,
@@ -289,6 +303,7 @@ function clearPrefixMemory(state: InstanceState): void {
 
 function resetRunState(state: InstanceState): void {
   state.snapshot = emptySnapshot();
+  state.liveRun = emptyLiveRun();
   state.turnReports = [];
   state.unknown400.clear();
   state.firstPromptChars = null;
@@ -386,14 +401,100 @@ function stripProvider(name: string): string {
 }
 
 function readFooterCtx(state: InstanceState, ctx: any): void {
-  state.footerModelName = ctx?.model?.name ?? "";
-  state.footerThinking = ctx?.thinkingLevel;
-  const cu = ctx?.getContextUsage ? ctx.getContextUsage() : undefined;
-  state.footerContext = cu ? { tokens: cu.tokens, contextWindow: cu.contextWindow, percent: cu.percent } : null;
+  try {
+    state.footerModelName = ctx?.model?.name ?? "";
+    state.footerThinking = ctx?.thinkingLevel;
+    const cu = typeof ctx?.getContextUsage === "function" ? ctx.getContextUsage() : undefined;
+    state.footerContext = cu && typeof cu === "object"
+      ? { tokens: cu.tokens ?? null, contextWindow: cu.contextWindow ?? 0, percent: cu.percent ?? null }
+      : null;
+  } catch {
+    // ignore
+  }
 }
 
-function refreshFooter(state: InstanceState): void {
-  state.footerTui?.requestRender?.(true);
+function refreshFooter(state: InstanceState, force = false): void {
+  try {
+    if (force) {
+      state.footerTui?.requestRender?.(true);
+    } else {
+      state.footerTui?.requestRender?.();
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function recordTurnUsage(state: InstanceState, rawMessage: any): void {
+  if (!rawMessage || typeof rawMessage !== "object") return;
+  if (rawMessage.role !== "assistant" || !rawMessage.usage) return;
+  const norm = normalizeUsage(rawMessage.usage);
+  if (typeof rawMessage.usage === "object" && rawMessage.usage !== null) {
+    try {
+      if (rawMessage.usage.input === undefined) rawMessage.usage.input = norm.input;
+      if (rawMessage.usage.output === undefined) rawMessage.usage.output = norm.output;
+      if (rawMessage.usage.cacheRead === undefined) rawMessage.usage.cacheRead = norm.cacheRead;
+      if (rawMessage.usage.cacheWrite === undefined) rawMessage.usage.cacheWrite = norm.cacheWrite;
+      if (rawMessage.usage.totalTokens === undefined) rawMessage.usage.totalTokens = norm.totalTokens;
+      if ((rawMessage.usage as any).total === undefined) (rawMessage.usage as any).total = norm.totalTokens;
+    } catch {
+      // ignore frozen / non-extensible objects
+    }
+  }
+  const denom = cacheHitDenom(norm);
+  state.liveRun.input += norm.input;
+  state.liveRun.output += norm.output;
+  state.liveRun.cacheWrite += norm.cacheWrite;
+  if (denom > 0) {
+    state.liveRun.cacheRead += norm.cacheRead;
+    state.liveRun.hitDenom += denom;
+  }
+  state.snapshot.totalInput += norm.input;
+  state.snapshot.totalOutput += norm.output;
+  state.snapshot.totalCacheWrite += norm.cacheWrite;
+  if (denom > 0) {
+    state.snapshot.totalCacheRead += norm.cacheRead;
+    state.snapshot.totalHitDenom += denom;
+  }
+}
+
+export function extractAndNormalizeUsage(
+  raw: any,
+): { input: number; output: number; cacheRead: number; cacheWrite: number } {
+  let inp = 0, outp = 0, cr = 0, cw = 0;
+  if (!raw) return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+
+  const items = Array.isArray(raw) ? raw : [raw];
+  for (const item of items) {
+    if (!item || typeof item !== "object") continue;
+    let u: any;
+    if ("role" in item) {
+      if (item.role !== "assistant" || !item.usage) continue;
+      u = item.usage;
+    } else if ("usage" in item && item.usage) {
+      u = item.usage;
+    } else {
+      u = item;
+    }
+    const norm = normalizeUsage(u);
+    if (typeof u === "object" && u !== null) {
+      try {
+        if (u.input === undefined) u.input = norm.input;
+        if (u.output === undefined) u.output = norm.output;
+        if (u.cacheRead === undefined) u.cacheRead = norm.cacheRead;
+        if (u.cacheWrite === undefined) u.cacheWrite = norm.cacheWrite;
+        if (u.totalTokens === undefined) u.totalTokens = norm.totalTokens;
+        if ((u as any).total === undefined) (u as any).total = norm.totalTokens;
+      } catch {
+        // ignore frozen / non-extensible objects
+      }
+    }
+    inp += norm.input;
+    outp += norm.output;
+    cr += norm.cacheRead;
+    cw += norm.cacheWrite;
+  }
+  return { input: inp, output: outp, cacheRead: cr, cacheWrite: cw };
 }
 
 /**
@@ -1437,37 +1538,30 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
+  // ── 3b. agent_start: reset liveRun accumulator for this agent run ──
+  pi.on("agent_start", async (_event, _ctx) => {
+    if (!state.runtimeEnabled) return;
+    state.liveRun = emptyLiveRun();
+  });
+
   // ── 4. agent_end: collect cache stats for this instance ──
   pi.on("agent_end", async (event, ctx) => {
     if (!state.runtimeEnabled) return;
     state.snapshot.turns += 1;
-    let cr = 0, cw = 0, inp = 0, outp = 0;
-    for (const msg of event.messages ?? []) {
-      // `usage` is only present on assistant messages; other message kinds in the
-      // AgentMessage union (e.g. BashExecutionMessage) carry no usage field.
-      if (msg.role !== "assistant" || !("usage" in msg) || !msg.usage) continue;
-      const u = msg.usage;
-      const norm = normalizeUsage(u);
-      if (u.input === undefined) u.input = norm.input;
-      if (u.output === undefined) u.output = norm.output;
-      if (u.cacheRead === undefined) u.cacheRead = norm.cacheRead;
-      if (u.cacheWrite === undefined) u.cacheWrite = norm.cacheWrite;
-      if (u.totalTokens === undefined) u.totalTokens = norm.totalTokens;
-      if ((u as any).total === undefined) (u as any).total = norm.totalTokens;
-      inp += norm.input;
-      outp += norm.output;
-      cr += norm.cacheRead;
-      cw += norm.cacheWrite;
+    let inp = state.liveRun.input;
+    let outp = state.liveRun.output;
+    let cr = state.liveRun.cacheRead;
+    let cw = state.liveRun.cacheWrite;
+    let denom = state.liveRun.hitDenom;
+    if (inp === 0 && outp === 0 && cr === 0 && cw === 0 && event?.messages?.length) {
+      const fallback = extractAndNormalizeUsage(event.messages);
+      inp = fallback.input;
+      outp = fallback.output;
+      cr = fallback.cacheRead;
+      cw = fallback.cacheWrite;
+      denom = cacheHitDenom({ input: inp, cacheRead: cr, cacheWrite: cw });
     }
-    const denom = cacheHitDenom({ input: inp, cacheRead: cr, cacheWrite: cw });
-    const hitPct = cacheHitPct({ input: inp, cacheRead: cr, cacheWrite: cw });
-    state.snapshot.totalInput += inp;
-    state.snapshot.totalOutput += outp;
-    state.snapshot.totalCacheWrite += cw;
-    if (denom > 0) {
-      state.snapshot.totalCacheRead += cr;
-      state.snapshot.totalHitDenom += denom;
-    }
+    const hitPct = aggregateHit(cr, denom);
     state.turnReports.push({ turn: state.snapshot.turns, input: inp, output: outp, cacheRead: cr, cacheWrite: cw, denom, hitPct });
     if (state.turnReports.length > TURN_REPORT_LIMIT) {
       state.turnReports.splice(0, state.turnReports.length - TURN_REPORT_LIMIT);
@@ -1481,7 +1575,30 @@ export default function (pi: ExtensionAPI) {
       });
     }
     readFooterCtx(state, ctx);
-    refreshFooter(state);
+    refreshFooter(state, true);
+    state.liveRun = emptyLiveRun();
+  });
+
+  // ── 4b. live footer updates during long runs: turn_end & tool executions ──
+  pi.on("turn_end", (event, ctx) => {
+    if (!state.runtimeEnabled) return;
+    if (event.message) {
+      recordTurnUsage(state, event.message);
+    }
+    readFooterCtx(state, ctx);
+    refreshFooter(state, false);
+  });
+
+  pi.on("tool_execution_start", (_event, ctx) => {
+    if (!state.runtimeEnabled) return;
+    readFooterCtx(state, ctx);
+    refreshFooter(state, false);
+  });
+
+  pi.on("tool_execution_end", (_event, ctx) => {
+    if (!state.runtimeEnabled) return;
+    readFooterCtx(state, ctx);
+    refreshFooter(state, false);
   });
 
   // ── 5. session_shutdown: cache guard ──
@@ -1508,12 +1625,12 @@ export default function (pi: ExtensionAPI) {
   pi.on("model_select", (_event, ctx) => {
     if (!state.runtimeEnabled) return;
     readFooterCtx(state, ctx);
-    refreshFooter(state);
+    refreshFooter(state, true);
   });
   pi.on("thinking_level_select", (_event, ctx) => {
     if (!state.runtimeEnabled) return;
     state.footerThinking = ctx.thinkingLevel;
-    refreshFooter(state);
+    refreshFooter(state, true);
   });
 
   // ── 7. /cache-guardian command ──
@@ -1544,7 +1661,7 @@ export default function (pi: ExtensionAPI) {
     }
     if (cmd === "reset") {
       resetRunState(state);
-      refreshFooter(state);
+      refreshFooter(state, true);
       ctx.ui.notify(`[${LOG}] Current-run cache stats, unclassified 400 list, and prefix diagnostics reset.`, "info");
       return;
     }

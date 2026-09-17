@@ -436,8 +436,18 @@ function compactableSkillSet() {
     const bPrompt = await promptThrough(b.runner, `SESSION_B_ROUND_${i}`);
     assert.equal(aPrompt, `SESSION_A_ROUND_${i}`);
     assert.equal(bPrompt, `SESSION_B_ROUND_${i}`);
+    await fire(a.ext, "turn_end", a.ctx, {
+      turnIndex: i - 1,
+      message: { role: "assistant", usage: { input: 10 * i, cacheRead: 80, cacheWrite: 0 } },
+      toolResults: [],
+    });
     await fire(a.ext, "agent_end", a.ctx, {
       messages: [{ role: "assistant", usage: { input: 10 * i, cacheRead: 80, cacheWrite: 0 } }],
+    });
+    await fire(b.ext, "turn_end", b.ctx, {
+      turnIndex: i - 1,
+      message: { role: "assistant", usage: { input: 3 * i, cacheRead: 20, cacheWrite: 0 } },
+      toolResults: [],
     });
     await fire(b.ext, "agent_end", b.ctx, {
       messages: [{ role: "assistant", usage: { input: 3 * i, cacheRead: 20, cacheWrite: 0 } }],
@@ -453,10 +463,20 @@ function compactableSkillSet() {
   await a.ext.commands.get("cache-guardian").handler("disable", a.ctx);
   const bAfterADisable = await promptThrough(b.runner, "SESSION_B_STILL_ON");
   assert.equal(bAfterADisable, "SESSION_B_STILL_ON");
+  await fire(a.ext, "turn_end", a.ctx, {
+    turnIndex: 3,
+    message: { role: "assistant", usage: { input: 999, cacheRead: 1, cacheWrite: 0 } },
+    toolResults: [],
+  });
   await fire(a.ext, "agent_end", a.ctx, {
     messages: [{ role: "assistant", usage: { input: 999, cacheRead: 1, cacheWrite: 0 } }],
   });
   assert.equal(a.ctx.entries.length, 3);
+  await fire(b.ext, "turn_end", b.ctx, {
+    turnIndex: 3,
+    message: { role: "assistant", usage: { input: 1, cacheRead: 1, cacheWrite: 0 } },
+    toolResults: [],
+  });
   await fire(b.ext, "agent_end", b.ctx, {
     messages: [{ role: "assistant", usage: { input: 1, cacheRead: 1, cacheWrite: 0 } }],
   });
@@ -500,6 +520,11 @@ function compactableSkillSet() {
   ctx.footers.length = 0;
   await fire(ext, "session_start", ctx);
   assert.equal(ctx.footers.length, 0);
+  await fire(ext, "turn_end", ctx, {
+    turnIndex: 0,
+    message: { role: "assistant", usage: { input: 1, cacheRead: 1, cacheWrite: 0 } },
+    toolResults: [],
+  });
   await fire(ext, "agent_end", ctx, {
     messages: [{ role: "assistant", usage: { input: 1, cacheRead: 1, cacheWrite: 0 } }],
   });
@@ -512,6 +537,16 @@ function compactableSkillSet() {
 
 {
   const { ext, ctx } = await fresh();
+  await fire(ext, "turn_end", ctx, {
+    turnIndex: 0,
+    message: { role: "assistant", usage: { input: 20, cacheRead: 80, cacheWrite: 0 } },
+    toolResults: [],
+  });
+  await fire(ext, "turn_end", ctx, {
+    turnIndex: 1,
+    message: { role: "assistant", usage: { input: 30, cacheRead: 90, cacheWrite: 0 } },
+    toolResults: [],
+  });
   await fire(ext, "agent_end", ctx, {
     messages: [
       { role: "assistant", usage: { input: 20, cacheRead: 80, cacheWrite: 0 } },
@@ -570,6 +605,11 @@ function compactableSkillSet() {
 {
   const { ext, ctx } = await fresh();
   for (let i = 0; i < 55; i++) {
+    await fire(ext, "turn_end", ctx, {
+      turnIndex: i,
+      message: { role: "assistant", usage: { input: 1, cacheRead: 0, cacheWrite: 0 } },
+      toolResults: [],
+    });
     await fire(ext, "agent_end", ctx, {
       messages: [{ role: "assistant", usage: { input: 1, cacheRead: 0, cacheWrite: 0 } }],
     });
@@ -665,6 +705,11 @@ function compactableSkillSet() {
       total_tokens: 1500,
     },
   };
+  await fire(ext, "turn_end", ctx, {
+    turnIndex: 0,
+    message: assistantMsg,
+    toolResults: [],
+  });
   await fire(ext, "agent_end", ctx, {
     messages: [assistantMsg],
   });
@@ -703,6 +748,11 @@ function compactableSkillSet() {
       },
     },
   };
+  await fire(ext, "turn_end", ctx, {
+    turnIndex: 0,
+    message: assistantMsg,
+    toolResults: [],
+  });
   await fire(ext, "agent_end", ctx, {
     messages: [assistantMsg],
   });
@@ -745,6 +795,14 @@ function compactableSkillSet() {
 
   const { ext } = await fresh(ctx);
   // Turn 1: pure OpenAI usage without cache
+  await fire(ext, "turn_end", ctx, {
+    turnIndex: 0,
+    message: {
+      role: "assistant",
+      usage: { prompt_tokens: 1000, completion_tokens: 200, total_tokens: 1200 },
+    },
+    toolResults: [],
+  });
   await fire(ext, "agent_end", ctx, {
     messages: [{
       role: "assistant",
@@ -761,6 +819,19 @@ function compactableSkillSet() {
   assert.match(rendered1, /■ GPT-4o/);
 
   // Turn 2: cache activity arrives
+  await fire(ext, "turn_end", ctx, {
+    turnIndex: 1,
+    message: {
+      role: "assistant",
+      usage: {
+        prompt_tokens: 200,
+        completion_tokens: 100,
+        total_tokens: 1100,
+        prompt_tokens_details: { cached_tokens: 800 },
+      },
+    },
+    toolResults: [],
+  });
   await fire(ext, "agent_end", ctx, {
     messages: [{
       role: "assistant",
@@ -778,6 +849,382 @@ function compactableSkillSet() {
   assert.match(rendered2, /◆ 40%/);
   assert.match(rendered2, /▲ 50%\/128K/);
   ok("Footer correctly shows ◆ n/a without cache and ▲ real context usage");
+}
+
+{
+  let footerComponent = null;
+  let renderCount = 0;
+  let currentUsage = { tokens: 5000, contextWindow: 131072, percent: 10 };
+  const ctx = mockContext({
+    mode: "tui",
+    model: { name: "Claude-3.5-Sonnet (anthropic)" },
+    getContextUsage: () => currentUsage,
+    ui: {
+      notify() {},
+      setFooter(factory) {
+        if (typeof factory === "function") {
+          footerComponent = factory(
+            { requestRender: () => { renderCount++; } },
+            { fg: (_s, t) => t },
+            { getExtensionStatuses: () => new Map() }
+          );
+        }
+      },
+    },
+  });
+
+  const { ext } = await fresh(ctx);
+  assert.ok(footerComponent, "footer should be installed in TUI");
+
+  // 1. turn_end with usage accumulates snapshot and requests render
+  renderCount = 0;
+  currentUsage = { tokens: 10000, contextWindow: 131072, percent: 20 };
+  await fire(ext, "turn_end", ctx, {
+    turnIndex: 0,
+    message: {
+      role: "assistant",
+      usage: { input: 100, cacheRead: 300, cacheWrite: 0 },
+    },
+  });
+  assert.equal(renderCount, 1, "turn_end must trigger footer render");
+  const renderedTurn = footerComponent.render(120)[0];
+  assert.match(renderedTurn, /◆ 75%/); // 300 / 400 = 75%
+  assert.match(renderedTurn, /▲ 20%\/128K/);
+
+  // 2. tool_execution_start updates context usage and requests render
+  renderCount = 0;
+  currentUsage = { tokens: 25000, contextWindow: 131072, percent: 50 };
+  await fire(ext, "tool_execution_start", ctx, {
+    toolCallId: "call-1",
+    toolName: "bash",
+    args: { command: "sleep 1" },
+  });
+  assert.equal(renderCount, 1, "tool_execution_start must trigger footer render");
+  const renderedToolStart = footerComponent.render(120)[0];
+  assert.match(renderedToolStart, /▲ 50%\/128K/);
+
+  // 3. tool_execution_end updates context usage and requests render
+  renderCount = 0;
+  currentUsage = { tokens: 30000, contextWindow: 131072, percent: 60 };
+  await fire(ext, "tool_execution_end", ctx, {
+    toolCallId: "call-1",
+    toolName: "bash",
+    result: { output: "done" },
+    isError: false,
+  });
+  assert.equal(renderCount, 1, "tool_execution_end must trigger footer render");
+  const renderedToolEnd = footerComponent.render(120)[0];
+  assert.match(renderedToolEnd, /▲ 60%\/128K/);
+
+  // 4. disabled state ignores turn_end and tool execution events
+  await ext.commands.get("cache-guardian").handler("disable", ctx);
+  renderCount = 0;
+  await fire(ext, "turn_end", ctx, {
+    turnIndex: 1,
+    message: { role: "assistant", usage: { input: 50, cacheRead: 50, cacheWrite: 0 } },
+  });
+  await fire(ext, "tool_execution_start", ctx, { toolCallId: "call-2", toolName: "bash", args: {} });
+  assert.equal(renderCount, 0, "disabled guardian must not trigger footer render");
+
+  ok("Live footer updates on turn_end and tool execution start/end");
+}
+
+// ── Regression: (a) No double counting when turn_end followed by agent_end ──
+{
+  const { ext, ctx } = await fresh();
+  const assistantMsg = {
+    role: "assistant",
+    usage: { input: 150, cacheRead: 350, cacheWrite: 50 },
+  };
+  await fire(ext, "turn_end", ctx, {
+    turnIndex: 0,
+    message: assistantMsg,
+    toolResults: [],
+  });
+  await fire(ext, "agent_end", ctx, {
+    messages: [assistantMsg],
+  });
+
+  ctx.notices.length = 0;
+  await ext.commands.get("cache-guardian").handler("", ctx);
+  const stats = ctx.notices.map((n) => n[0]).join("\n");
+  assert.match(stats, /Cumulative: input=150  output=0  cacheRead=350  cacheWrite=50/);
+  assert.match(stats, /read=350 \/ denom=550/);
+  assert.match(stats, /Turns: 1/);
+  assert.equal(ctx.entries.length, 1);
+  assert.deepEqual(ctx.entries[0][1], {
+    turn: 1,
+    input: 150,
+    cacheRead: 350,
+    cacheWrite: 50,
+    denom: 550,
+    hitPct: 64,
+  });
+  ok("Regression (a): turn_end followed by agent_end counts usage exactly once (no double counting)");
+}
+
+// ── Regression: (b) Consecutive turn_end events each accumulate once ──
+{
+  const { ext, ctx } = await fresh();
+  const msg1 = {
+    role: "assistant",
+    usage: { input: 100, cacheRead: 200, cacheWrite: 0 },
+  };
+  const msg2 = {
+    role: "assistant",
+    usage: { input: 50, cacheRead: 150, cacheWrite: 50 },
+  };
+  await fire(ext, "turn_end", ctx, {
+    turnIndex: 0,
+    message: msg1,
+    toolResults: [],
+  });
+  await fire(ext, "turn_end", ctx, {
+    turnIndex: 1,
+    message: msg2,
+    toolResults: [],
+  });
+
+  ctx.notices.length = 0;
+  await ext.commands.get("cache-guardian").handler("", ctx);
+  let stats = ctx.notices.map((n) => n[0]).join("\n");
+  // Total: input=150, cacheRead=350, cacheWrite=50, denom=550
+  assert.match(stats, /Cumulative: input=150  output=0  cacheRead=350  cacheWrite=50/);
+  assert.match(stats, /read=350 \/ denom=550/);
+
+  // Now fire agent_end
+  await fire(ext, "agent_end", ctx, {
+    messages: [msg1, msg2],
+  });
+
+  ctx.notices.length = 0;
+  await ext.commands.get("cache-guardian").handler("", ctx);
+  stats = ctx.notices.map((n) => n[0]).join("\n");
+  // Still exactly 150/350/50, not doubled
+  assert.match(stats, /Cumulative: input=150  output=0  cacheRead=350  cacheWrite=50/);
+  assert.match(stats, /Turns: 1/);
+  assert.deepEqual(ctx.entries.at(-1)?.[1], {
+    turn: 1,
+    input: 150,
+    cacheRead: 350,
+    cacheWrite: 50,
+    denom: 550,
+    hitPct: 64,
+  });
+  ok("Regression (b): consecutive turn_end events each accumulate once");
+}
+
+// ── Regression: (c) agent_end clears liveRun and increments turns by 1; next run accumulates cleanly ──
+{
+  const { ext, ctx } = await fresh();
+  // Run 1: 1 turn
+  await fire(ext, "agent_start", ctx);
+  await fire(ext, "turn_end", ctx, {
+    turnIndex: 0,
+    message: { role: "assistant", usage: { input: 100, cacheRead: 400, cacheWrite: 0 } },
+    toolResults: [],
+  });
+  await fire(ext, "agent_end", ctx, {
+    messages: [{ role: "assistant", usage: { input: 100, cacheRead: 400, cacheWrite: 0 } }],
+  });
+
+  // Run 2: aborted / no turn_end
+  await fire(ext, "agent_start", ctx);
+  await fire(ext, "agent_end", ctx, { messages: [] });
+
+  ctx.notices.length = 0;
+  await ext.commands.get("cache-guardian").handler("", ctx);
+  let stats = ctx.notices.map((n) => n[0]).join("\n");
+  assert.match(stats, /Turns: 2/);
+  assert.match(stats, /Cumulative: input=100  output=0  cacheRead=400  cacheWrite=0/);
+
+  // Run 3: 1 turn
+  await fire(ext, "agent_start", ctx);
+  await fire(ext, "turn_end", ctx, {
+    turnIndex: 0,
+    message: { role: "assistant", usage: { input: 50, cacheRead: 100, cacheWrite: 0 } },
+    toolResults: [],
+  });
+  await fire(ext, "agent_end", ctx, {
+    messages: [{ role: "assistant", usage: { input: 50, cacheRead: 100, cacheWrite: 0 } }],
+  });
+
+  ctx.notices.length = 0;
+  await ext.commands.get("cache-guardian").handler("", ctx);
+  stats = ctx.notices.map((n) => n[0]).join("\n");
+  assert.match(stats, /Turns: 3/);
+  assert.match(stats, /Cumulative: input=150  output=0  cacheRead=500  cacheWrite=0/);
+  assert.equal(ctx.entries.length, 2); // Run 2 had 0 cache activity so not appended
+  ok("Regression (c): agent_end clears liveRun, turns increments correctly across runs including aborts");
+}
+
+// ── Regression: render throttling calls requestRender() unforced for turn_end/tools and forced for agent_end/model_select/reset ──
+{
+  const renderCalls = [];
+  const ctx = mockContext({
+    mode: "tui",
+    model: { name: "Test-Model" },
+    getContextUsage: () => undefined,
+    ui: {
+      notify() {},
+      setFooter(factory) {
+        if (typeof factory === "function") {
+          factory(
+            { requestRender: (force) => renderCalls.push(force) },
+            { fg: (_s, t) => t },
+            { getExtensionStatuses: () => new Map() },
+          );
+        }
+      },
+    },
+  });
+
+  const { ext } = await fresh(ctx);
+
+  renderCalls.length = 0;
+  await fire(ext, "turn_end", ctx, {
+    turnIndex: 0,
+    message: { role: "assistant", usage: { input: 10, cacheRead: 20, cacheWrite: 0 } },
+    toolResults: [],
+  });
+  assert.deepEqual(renderCalls, [undefined], "turn_end must call unforced requestRender()");
+
+  renderCalls.length = 0;
+  await fire(ext, "tool_execution_start", ctx, { toolCallId: "1", toolName: "bash", args: {} });
+  assert.deepEqual(renderCalls, [undefined], "tool_execution_start must call unforced requestRender()");
+
+  renderCalls.length = 0;
+  await fire(ext, "tool_execution_end", ctx, { toolCallId: "1", toolName: "bash", result: {}, isError: false });
+  assert.deepEqual(renderCalls, [undefined], "tool_execution_end must call unforced requestRender()");
+
+  renderCalls.length = 0;
+  await fire(ext, "agent_end", ctx, { messages: [] });
+  assert.deepEqual(renderCalls, [true], "agent_end must call force=true requestRender()");
+
+  renderCalls.length = 0;
+  await fire(ext, "model_select", ctx);
+  assert.deepEqual(renderCalls, [true], "model_select must call force=true requestRender()");
+
+  renderCalls.length = 0;
+  await fire(ext, "thinking_level_select", ctx);
+  assert.deepEqual(renderCalls, [true], "thinking_level_select must call force=true requestRender()");
+
+  renderCalls.length = 0;
+  await ext.commands.get("cache-guardian").handler("reset", ctx);
+  assert.deepEqual(renderCalls, [true], "reset command must call force=true requestRender()");
+
+  ok("Regression render throttling: unforced vs force=true properly dispatched");
+}
+
+// ── Regression: frozen usage objects do not throw TypeError in turn_end or extractAndNormalizeUsage ──
+{
+  const { ext, ctx } = await fresh();
+  const frozenUsage = Object.freeze({
+    input: 100,
+    output: 50,
+    cacheRead: 200,
+    cacheWrite: 0,
+  });
+  const frozenMsg = Object.freeze({
+    role: "assistant",
+    usage: frozenUsage,
+  });
+
+  // Should not throw TypeError when modifying frozen properties
+  await fire(ext, "turn_end", ctx, {
+    turnIndex: 0,
+    message: frozenMsg,
+    toolResults: [],
+  });
+  await fire(ext, "agent_end", ctx, {
+    messages: [frozenMsg],
+  });
+
+  ctx.notices.length = 0;
+  await ext.commands.get("cache-guardian").handler("", ctx);
+  const stats = ctx.notices.map((n) => n[0]).join("\n");
+  assert.match(stats, /Cumulative: input=100  output=50  cacheRead=200  cacheWrite=0/);
+  assert.equal(ctx.entries.length, 1);
+  assert.deepEqual(ctx.entries[0][1], {
+    turn: 1,
+    input: 100,
+    cacheRead: 200,
+    cacheWrite: 0,
+    denom: 300,
+    hitPct: 67,
+  });
+  ok("Regression: frozen usage objects handled defensively without throwing");
+}
+
+// ── Regression: agent_end fallback when liveRun.input === 0 and event.messages present (no turn_end) ──
+{
+  const { ext, ctx } = await fresh();
+  const msg = {
+    role: "assistant",
+    usage: { input: 120, cacheRead: 360, cacheWrite: 0 },
+  };
+
+  // Only fire agent_end (simulate harness that emits only agent_end)
+  await fire(ext, "agent_start", ctx);
+  await fire(ext, "agent_end", ctx, {
+    messages: [msg],
+  });
+
+  // 1. turnReports and appendCustomEntry received the fallback stats
+  assert.equal(ctx.entries.length, 1);
+  assert.deepEqual(ctx.entries[0][1], {
+    turn: 1,
+    input: 120,
+    cacheRead: 360,
+    cacheWrite: 0,
+    denom: 480,
+    hitPct: 75,
+  });
+
+  // 2. snapshot was NOT written by fallback (avoids double counting)
+  ctx.notices.length = 0;
+  await ext.commands.get("cache-guardian").handler("", ctx);
+  const stats = ctx.notices.map((n) => n[0]).join("\n");
+  assert.match(stats, /Turns: 1/);
+  assert.match(stats, /Cumulative: input=0  output=0  cacheRead=0  cacheWrite=0/);
+
+  ok("Regression: agent_end fallback calculates turnReports/customEntry without writing to state.snapshot");
+}
+
+// ── Regression: liveRun has cacheRead with input=0 (100% cache hit) does NOT trigger agent_end fallback ──
+{
+  const { ext, ctx } = await fresh();
+  // Turn 1: 100% cache hit -> input = 0, cacheRead = 500
+  await fire(ext, "agent_start", ctx);
+  await fire(ext, "turn_end", ctx, {
+    message: {
+      role: "assistant",
+      usage: { input: 0, output: 50, cacheRead: 500, cacheWrite: 0 },
+    },
+  });
+
+  // agent_end with different messages (e.g. cumulative or previous history)
+  await fire(ext, "agent_end", ctx, {
+    messages: [
+      {
+        role: "assistant",
+        usage: { input: 999, output: 999, cacheRead: 999, cacheWrite: 0 },
+      },
+    ],
+  });
+
+  // 1. turnReports / appendCustomEntry should reflect liveRun (input=0, cacheRead=500), NOT fallback (999)
+  assert.equal(ctx.entries.length, 1);
+  assert.deepEqual(ctx.entries[0][1], {
+    turn: 1,
+    input: 0,
+    cacheRead: 500,
+    cacheWrite: 0,
+    denom: 500,
+    hitPct: 100,
+  });
+
+  ok("Regression: 100% cache hit (input=0, cacheRead>0 in liveRun) does not trigger agent_end fallback");
 }
 
 console.log(`All cache-guardian regressions passed (${passed} cases, sdk=${sdkVersion})`);
