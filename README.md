@@ -58,6 +58,13 @@ Turn off with `PI_CACHE_GUARDIAN_PREFIX_DIAGNOSTICS=0`. `/cache-guardian disable
 
 Pi-native provider behavior stays first. Unknown endpoints keep host/user configuration. This tree does not hard-code a vendor capability table, and offline tests are not evidence of server-side caching or bill savings.
 
+### 8. Live TUI footer (default on)
+
+When running in TUI mode, the footer updates in real time during long-running tasks rather than waiting only for the final `agent_end` event:
+- **Refresh triggers:** Cache hit rate is accumulated and refreshed at each LLM `turn_end`, while context window usage is refreshed at `tool_execution_start` and `tool_execution_end`.
+- **Throttled rendering:** High-frequency event paths use TUI 16ms render throttling (`requestRender()` non-force) without forced repaints, while low-frequency events (`agent_end`, `model_select`, `thinking_level_select`, and `/cache-guardian reset`) use forced redraws (`force=true`).
+- **Single-entry accumulation:** Token usage is accumulated solely at `turn_end` into a run-level `liveRun` buffer (settled directly at `agent_end` without re-scanning messages), preventing double-counting.
+
 ## Install
 
 ### npm (recommended)
@@ -84,7 +91,7 @@ cp pi-cache-guardian/extensions/cache-guardian.ts ~/.pi/agent/extensions/
 | `PI_CACHE_GUARD_THRESHOLD` | `90` | Cache guard hit-rate threshold |
 | `PI_CACHE_GUARD_SKILL_COMPACT` | `0` | Opt-in lossless compact of a recognized skills XML listing |
 | `PI_CACHE_GUARD_STRIP_RETENTION` | `0` | Delete legacy `prompt_cache_retention` only (not Anthropic TTL / `prompt_cache_options`) |
-| `PI_CACHE_GUARD_FOOTER` | enabled | Custom footer on by default in TUI; `0` / `false` disables it |
+| `PI_CACHE_GUARD_FOOTER` | enabled | Custom footer on by default in TUI (live updates during long runs); `0` / `false` disables it |
 | `PI_CACHE_GUARDIAN_PREFIX_DIAGNOSTICS` | enabled | Read-only prefix-change snapshot at this extension hook; `0` / `false` / `off` / `no` disables it |
 
 #### Deprecated (no-ops; do not restore old dangerous behavior)

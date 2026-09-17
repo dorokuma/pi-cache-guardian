@@ -58,6 +58,13 @@ Pi Agent 的事件系统与扩展 API 已经可用。服务端缓存仍取决于
 
 仍以 Pi 原生行为为先，未知端点尊重宿主/用户配置。本树不硬编码厂商能力表；离线测试通过不等于服务端已支持缓存，也不等于实测省钱。
 
+### 8. 实时 TUI 页脚（默认开启）
+
+在 TUI 模式下，footer 在长任务执行期间保持实时刷新，不再只在整轮结束（`agent_end`）时更新：
+- **刷新时机**：每轮 LLM 响应结束（`turn_end`）时累加并刷新缓存命中率统计；工具执行起止（`tool_execution_start` / `tool_execution_end`）时刷新上下文窗口占用。
+- **渲染节流**：高频更新路径走 TUI 16ms 渲染节流（`requestRender()` 非 force），避免不必要的强制重绘；低频事件（`agent_end`、`model_select`、`thinking_level_select`、`/cache-guardian reset`）保持 force 强制刷新。
+- **单入口累加**：token usage 仅在 `turn_end` 单入口累加到 run 级 `liveRun` 缓冲区（`agent_end` 时直接结算，不再重复扫描消息），保证不双计。
+
 ## 安装
 
 ### npm（推荐）
@@ -84,7 +91,7 @@ cp pi-cache-guardian/extensions/cache-guardian.ts ~/.pi/agent/extensions/
 | `PI_CACHE_GUARD_THRESHOLD` | `90` | 缓存守护命中率阈值 |
 | `PI_CACHE_GUARD_SKILL_COMPACT` | `0` | 对识别出的技能 XML 做无损精简 |
 | `PI_CACHE_GUARD_STRIP_RETENTION` | `0` | 只删除旧字段 `prompt_cache_retention`（不是 Anthropic TTL / `prompt_cache_options`） |
-| `PI_CACHE_GUARD_FOOTER` | 启用 | TUI 下默认启用自定义 footer；`0` / `false` 关闭 |
+| `PI_CACHE_GUARD_FOOTER` | 启用 | TUI 下默认启用自定义 footer（长任务期间实时刷新）；`0` / `false` 关闭 |
 | `PI_CACHE_GUARDIAN_PREFIX_DIAGNOSTICS` | 启用 | 本扩展 hook 上的只读前缀变化快照；`0` / `false` / `off` / `no` 关闭 |
 
 #### 已弃用（空操作，不会恢复旧的危险行为）
