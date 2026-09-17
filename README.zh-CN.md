@@ -6,6 +6,12 @@ Pi Agent 扩展：默认**观测** prompt cache 命中率，仅在显式开启�
 
 Pi Agent 的事件系统与扩展 API 已经可用。服务端缓存仍取决于渲染前缀稳定性、路由、TTL 和工作负载。本扩展按 Pi 净输入口径记录 usage，并可在 TUI 显示页脚。它不会在 provider 本身没有缓存时“创造”缓存，也不会静默丢掉新的系统规则、技能或 project_instructions 边界。
 
+## Development conventions
+
+详细的开发与协作规范维护于以下文档：
+- [AGENTS.md](./AGENTS.md)：Agent 协作铁律、真实构建/测试命令与仓库索引。
+- [.agents/notes/README.md](./.agents/notes/README.md)：决策笔记触发条件、豁免清单与维护规范。
+
 ## 核心机制
 
 ### 1. 安全观测（默认）

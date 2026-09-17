@@ -6,6 +6,12 @@ A Pi Agent extension that **observes** prompt-cache hit rate and optionally appl
 
 Pi Agent has a solid event system and extension API. Provider prompt caching still depends on a stable rendered prefix, provider routing, TTL, and workload. This extension records usage with Pi's net-input formula and can show a compact TUI footer. It does not claim to create caching where the provider already has none, and it does not silently drop new system rules, skills, or project-instruction boundaries.
 
+## Development conventions
+
+Detailed development and contribution guidelines are maintained across:
+- [AGENTS.md](./AGENTS.md): Agent collaboration rules, real build/test commands, and repo index pointers.
+- [.agents/notes/README.md](./.agents/notes/README.md): Decision notes triggering conditions, exemption rules, and maintenance guide.
+
 ## How it works
 
 ### 1. Safe observation (default)
