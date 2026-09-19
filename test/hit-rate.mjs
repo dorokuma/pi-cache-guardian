@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { cacheHitDenom, cacheHitPct, aggregateHit, normalizeUsage, computeLiveHitRates } from "../extensions/cache-guardian.ts";
+import { cacheHitDenom, cacheHitPct, aggregateHit, normalizeUsage, computeLiveHitRates, formatTps } from "../extensions/cache-guardian.ts";
 import { isolateCacheEnv } from "./helpers.mjs";
 
 isolateCacheEnv();
@@ -615,6 +615,44 @@ import { truncateFooter, formatHerdsmanStatus, formatWindowSize } from "../exten
   ];
   // Aggregate: (800 + 100) / (1000 + 200) = 900 / 1200 = 75%; latest remains null
   assert.deepEqual(computeLiveHitRates(noUsageMiddle), { aggregate: 75, latest: null });
+}
+
+// 10. formatTps: estimate output tokens/s from tokens + elapsed ms; null (n/a) when uncomputable.
+{
+  // Integers render as integer strings.
+  assert.equal(formatTps(45, 1000), "45");
+  assert.equal(formatTps(90, 2000), "45");
+  assert.equal(formatTps(10000, 1000), "10000");
+
+  // Non-integers keep at most 1 decimal, rounded.
+  assert.equal(formatTps(25, 2000), "12.5"); // 12.5 exactly
+  assert.equal(formatTps(1246, 100000), "12.5"); // 12.46 -> 12.5
+  assert.equal(formatTps(1244, 100000), "12.4"); // 12.44 -> 12.4
+  assert.equal(formatTps(4504, 100000), "45"); // 45.04 rounds to integer -> integer string
+
+  // Tiny speeds must not use scientific notation.
+  const tiny = formatTps(1, 100000); // 0.01 t/s
+  assert.equal(tiny, "0.0");
+  assert.ok(!/[eE]/.test(tiny), `tiny tps must not use scientific notation: ${tiny}`);
+
+  // Uncomputable -> null (footer renders n/a), never "NaN"/"Infinity".
+  assert.equal(formatTps(0, 1000), null); // zero output tokens
+  assert.equal(formatTps(-5, 1000), null); // negative output tokens
+  assert.equal(formatTps(NaN, 1000), null);
+  assert.equal(formatTps(Infinity, 1000), null);
+  assert.equal(formatTps(undefined, 1000), null);
+  assert.equal(formatTps(null, 1000), null);
+  assert.equal(formatTps("abc", 1000), null);
+  assert.equal(formatTps(45, 0), null); // zero elapsed
+  assert.equal(formatTps(45, -1), null); // negative elapsed
+  assert.equal(formatTps(45, NaN), null);
+  assert.equal(formatTps(45, Infinity), null);
+  assert.equal(formatTps(45, undefined), null);
+
+  // A valid quotient never renders as "NaN" or "Infinity".
+  for (const s of [formatTps(45, 1000), formatTps(25, 2000), formatTps(1, 100000)]) {
+    assert.ok(s !== "NaN" && s !== "Infinity", `tps string must be finite: ${s}`);
+  }
 }
 
 console.log("All hit-rate and footer tests passed!");

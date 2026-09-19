@@ -1172,19 +1172,20 @@ function compactableSkillSet() {
   assert.ok(footerComponent, "footer should be installed");
 
   currentUsage = { tokens: 5000, contextWindow: 10000, percent: 50 };
-  const line50 = footerComponent.render(120)[0];
+  const line50 = footerComponent.render(200)[0];
   assert.match(line50, /\[TEXT:50%\/10K\]/);
 
   currentUsage = { tokens: 8000, contextWindow: 10000, percent: 80 };
-  const line80 = footerComponent.render(120)[0];
+  const line80 = footerComponent.render(200)[0];
   assert.match(line80, /\[WARNING:80%\/10K\]/);
 
   currentUsage = { tokens: 9500, contextWindow: 10000, percent: 95 };
-  const line95 = footerComponent.render(120)[0];
+  const line95 = footerComponent.render(200)[0];
   assert.match(line95, /\[ERROR:95%\/10K\]/);
 
-  // Non-context segments keep their own colors: ◆/◇ n/a dim, model text
+  // Non-context segments keep their own colors: ◆/◇ n/a dim, ▸ t/s n/a dim, model text
   assert.match(line95, /\[DIM:n\/a\]/);
+  assert.match(line95, /\[DIM:\u25b8\] \[DIM:n\/a\]/);
   assert.match(line95, /\[TEXT:ctx-color-model/);
   assert.ok(!line95.includes("[ERROR:n/a]"), "error color must not leak outside context segment");
   assert.ok(!line95.includes("[WARNING:n/a]"), "warning color must not leak outside context segment");
@@ -1785,6 +1786,124 @@ function compactableSkillSet() {
   readFooterCtx(state, { model: { name: "sources-less" } });
   assert.equal(state.footerSources, null, "footerSources should be null when ctx provides neither source");
   ok("Lifecycle: readFooterCtx nulls footerSources when ctx provides neither source");
+}
+
+// ── Footer TPS slot: estimate last-turn tokens/s, n/a without a completed round ──
+{
+  let footerComponent = null;
+  const ctx = mockContext({
+    mode: "tui",
+    model: { name: "tps-model" },
+    getContextUsage: () => ({ tokens: 1000, contextWindow: 10000, percent: 10 }),
+    ui: {
+      notify() {},
+      setFooter(factory) {
+        if (typeof factory === "function") {
+          footerComponent = factory(
+            { requestRender: () => {} },
+            { fg: (_s, t) => t },
+            { getExtensionStatuses: () => new Map() },
+          );
+        }
+      },
+    },
+  });
+
+  const realNow = Date.now;
+  let fakeNow = 1_000_000;
+  Date.now = () => fakeNow;
+  try {
+    const { ext } = await fresh(ctx);
+    assert.ok(footerComponent, "footer should be installed");
+
+    // 1. No completed round yet -> ▸ n/a, placed between ▲ context and ■ model
+    const initial = footerComponent.render(200)[0];
+    assert.match(initial, /▸ n\/a/, "footer must show ▸ n/a before any completed turn");
+    const iCtx = initial.indexOf("▲");
+    const iTps = initial.indexOf("▸");
+    const iModel = initial.indexOf("■");
+    assert.ok(iCtx >= 0 && iTps >= 0 && iModel >= 0, "all three slots should render");
+    assert.ok(iCtx < iTps && iTps < iModel, "TPS slot must sit between ▲ context and ■ model");
+
+    // 2. turn_end without a recorded t0 -> n/a (no guess)
+    await fire(ext, "turn_end", ctx, {
+      message: { role: "assistant", usage: { input: 100, output: 90, cacheRead: 0, cacheWrite: 0 } },
+    });
+    assert.match(footerComponent.render(200)[0], /▸ n\/a/, "missing t0 must render n/a");
+
+    // 3. t0 from before_provider_request + assistant output -> expected t/s
+    fakeNow = 2_000_000;
+    await fire(ext, "before_provider_request", ctx, { payload: { model: "tps-model" } });
+    fakeNow = 2_002_000; // +2000ms
+    await fire(ext, "turn_end", ctx, {
+      message: { role: "assistant", usage: { input: 100, output: 90, cacheRead: 0, cacheWrite: 0 } },
+    });
+    assert.match(footerComponent.render(200)[0], /▸ 45 t\/s/, "90 output tokens over 2s must render 45 t/s");
+
+    // 4. tool loop: multiple before_provider_request calls, the LAST one wins
+    fakeNow = 3_000_000;
+    await fire(ext, "before_provider_request", ctx, { payload: {} });
+    fakeNow = 3_001_000;
+    await fire(ext, "before_provider_request", ctx, { payload: {} }); // last request wins
+    fakeNow = 3_003_000; // elapsed = 2000ms from the last t0
+    await fire(ext, "turn_end", ctx, {
+      message: { role: "assistant", usage: { output: 120 } },
+    });
+    assert.match(footerComponent.render(200)[0], /▸ 60 t\/s/, "last before_provider_request t0 must be used");
+
+    // 5. output tokens not a finite positive number -> n/a
+    fakeNow = 4_000_000;
+    await fire(ext, "before_provider_request", ctx, { payload: {} });
+    fakeNow = 4_001_000;
+    await fire(ext, "turn_end", ctx, {
+      message: { role: "assistant", usage: { input: 10, output: 0 } },
+    });
+    assert.match(footerComponent.render(200)[0], /▸ n\/a/, "zero output tokens must render n/a");
+
+    // 6. assistant message without usage (aborted round) -> n/a, no stale value kept
+    fakeNow = 5_000_000;
+    await fire(ext, "before_provider_request", ctx, { payload: {} });
+    fakeNow = 5_001_000;
+    await fire(ext, "turn_end", ctx, { message: { role: "assistant" } });
+    assert.match(footerComponent.render(200)[0], /▸ n\/a/, "assistant without usage must clear to n/a");
+
+    // 7. /cache-guardian reset clears the estimate
+    fakeNow = 6_000_000;
+    await fire(ext, "before_provider_request", ctx, { payload: {} });
+    fakeNow = 6_002_000;
+    await fire(ext, "turn_end", ctx, {
+      message: { role: "assistant", usage: { output: 90 } },
+    });
+    assert.match(footerComponent.render(200)[0], /▸ 45 t\/s/);
+    await ext.commands.get("cache-guardian").handler("reset", ctx);
+    assert.match(footerComponent.render(200)[0], /▸ n\/a/, "reset must clear the TPS estimate");
+
+    // 8. session_start (session switch) resets the estimate, no cross-session residue
+    fakeNow = 7_000_000;
+    await fire(ext, "before_provider_request", ctx, { payload: {} });
+    fakeNow = 7_002_000;
+    await fire(ext, "turn_end", ctx, {
+      message: { role: "assistant", usage: { output: 90 } },
+    });
+    assert.match(footerComponent.render(200)[0], /▸ 45 t\/s/);
+    await fire(ext, "session_start", ctx);
+    assert.match(footerComponent.render(200)[0], /▸ n\/a/, "session_start must clear the TPS estimate");
+
+    ok("Footer TPS slot estimates t/s, uses the last request t0, and resets to n/a");
+  } finally {
+    Date.now = realNow;
+  }
+}
+
+// ── Lifecycle: resetRunState/uninstallFooter clear TPS scratch fields ──
+{
+  const state = createInstanceState(true);
+  state.providerRequestStartedAt = 12345;
+  state.lastTurnTps = "45";
+  resetRunState(state);
+  assert.equal(state.providerRequestStartedAt, null, "resetRunState must clear providerRequestStartedAt");
+  assert.equal(state.lastTurnTps, null, "resetRunState must clear lastTurnTps");
+  ok("Lifecycle: resetRunState clears TPS scratch fields");
 }
 
 console.log(`All cache-guardian regressions passed (${passed} cases, sdk=${sdkVersion})`);

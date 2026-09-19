@@ -356,6 +356,10 @@ type InstanceState = {
     aggregate: number | null;
     latest: number | null;
   } | null;
+  // TPS estimation: t0 of the last provider request (Date.now()), and the
+  // formatted tokens/s of the last completed assistant turn (null -> footer n/a).
+  providerRequestStartedAt: number | null;
+  lastTurnTps: string | null;
   footerInstalled: boolean;
   prefixDiagEnabled: boolean;
   prefixSalt: Uint8Array;
@@ -397,6 +401,8 @@ export function createInstanceState(prefixDiagEnabled: boolean): InstanceState {
     footerResetEpoch: 0,
     footerResetBaseline: null,
     footerHitCache: null,
+    providerRequestStartedAt: null,
+    lastTurnTps: null,
     footerInstalled: false,
     prefixDiagEnabled,
     prefixSalt: randomSalt(),
@@ -428,11 +434,15 @@ export function resetRunState(state: InstanceState): void {
   state.footerResetEpoch += 1;
   state.footerResetBaseline = null;
   state.footerHitCache = null;
+  // Never carry a previous session's request timestamp or estimated speed across
+  // a reset / session_start; both must render n/a until this run produces a turn.
+  state.providerRequestStartedAt = null;
+  state.lastTurnTps = null;
 }
 
 // ── Custom footer ────────────────────────────────────────────────────
 // Unified geometric icon set (user requirement: one symbol family, no emoji+mixin).
-const FOOTER_ICON = { sheep: "●", hit: "◆", hitLatest: "◇", context: "▲", model: "■" };
+const FOOTER_ICON = { sheep: "●", hit: "◆", hitLatest: "◇", context: "▲", tps: "▸", model: "■" };
 
 function estimateTokens(chars: number): number {
   return Math.round(chars / 4);
@@ -471,7 +481,7 @@ function unescapeXml(s: string): string {
 // ── Custom footer helpers ────────────────────────────────────────────
 /** Strip the leading footer marker from the shepherd/herdsman extension status. */
 function sheepMeat(s: string): string {
-  return s.replace(/^\s*[◆◇●▲■]?\s*(?:(?:Shepherd|Herdsman)(?:\s*[·•|｜]\s*)?)/i, "").trim();
+  return s.replace(/^\s*[◆◇●▲■▸]?\s*(?:(?:Shepherd|Herdsman)(?:\s*[·•|｜]\s*)?)/i, "").trim();
 }
 /**
  * Format shepherd/herdsman status for footer.
@@ -514,6 +524,33 @@ export function formatWindowSize(size: number): string {
     return `${size / 1_024}K`;
   }
   return String(size);
+}
+
+/**
+ * Format an estimated model generation speed (output tokens per second) into a
+ * compact footer string.
+ *
+ * Definition: tps = outputTokens / (elapsedMs / 1000), i.e. the output tokens of
+ * the last assistant message over the wall-clock duration of its provider request.
+ *
+ * - integer speeds render as an integer string (45 -> "45")
+ * - non-integer speeds keep at most 1 decimal (12.46 -> "12.5")
+ * - tiny speeds never use scientific notation (0.04 -> "0.0")
+ * - returns null whenever the estimate is impossible or meaningless:
+ *   outputTokens not a finite positive number, elapsedMs not a finite positive
+ *   number, or a non-finite/non-positive quotient. Callers render null as n/a.
+ *   Never returns "NaN" or "Infinity".
+ */
+export function formatTps(outputTokens: number, elapsedMs: number): string | null {
+  const output = Number(outputTokens);
+  const elapsed = Number(elapsedMs);
+  if (!Number.isFinite(output) || output <= 0) return null;
+  if (!Number.isFinite(elapsed) || elapsed <= 0) return null;
+  const tps = output / (elapsed / 1000);
+  if (!Number.isFinite(tps) || tps <= 0) return null;
+  const rounded = Math.round(tps * 10) / 10;
+  if (Number.isInteger(rounded) && rounded !== 0) return String(rounded);
+  return rounded.toFixed(1);
 }
 /** Strip trailing " (provider)" from model display names; leave inner parens intact. */
 function stripProvider(name: string): string {
@@ -601,6 +638,22 @@ function recordTurnUsage(state: InstanceState, rawMessage: any): void {
   }
 }
 
+/**
+ * Estimate TPS for the turn that just finished: the output tokens of the
+ * assistant message over the elapsed time since the last before_provider_request
+ * (t0) of this turn. Returns the formatted value, or null when the inputs are
+ * not available / not meaningful (missing t0, no assistant usage, output not a
+ * finite positive number, elapsed <= 0). The caller renders null as n/a.
+ */
+function computeTurnTps(state: InstanceState, rawMessage: any): string | null {
+  if (!rawMessage || typeof rawMessage !== "object") return null;
+  if (rawMessage.role !== "assistant" || !rawMessage.usage) return null;
+  const startedAt = state.providerRequestStartedAt;
+  if (typeof startedAt !== "number") return null;
+  const output = normalizeUsage(rawMessage.usage).output;
+  return formatTps(output, Date.now() - startedAt);
+}
+
 export function extractAndNormalizeUsage(
   raw: any,
 ): { input: number; output: number; cacheRead: number; cacheWrite: number } {
@@ -660,6 +713,8 @@ function uninstallFooter(state: InstanceState, ui: any): void {
   state.footerSources = null;
   state.footerContext = null;
   state.footerHitCache = null;
+  state.providerRequestStartedAt = null;
+  state.lastTurnTps = null;
   state.footerInstalled = false;
 }
 
@@ -741,7 +796,12 @@ function installFooter(state: InstanceState, ui: any): void {
               ? `${Math.round(cuPercent)}%/${formatWindowSize(cu.contextWindow)}`
               : `${Math.round(cuPercent)}%`);
         parts.push(`${theme.fg("dim", FOOTER_ICON.context)} ${ctxStr}`);
-        // 4. model name + thinking level — icon ■ (single segment, merged)
+        // 4. last-turn generation speed (estimate) — icon ▸ (tokens/s)
+        const tpsStr = state.lastTurnTps === null
+          ? theme.fg("dim", "n/a")
+          : theme.fg("text", `${state.lastTurnTps} t/s`);
+        parts.push(`${theme.fg("dim", FOOTER_ICON.tps)} ${tpsStr}`);
+        // 5. model name + thinking level — icon ■ (single segment, merged)
         if (state.footerModelName) {
           let m: string = stripProvider(state.footerModelName);
           if (state.footerThinking) m += ` · ${state.footerThinking}`;
@@ -1692,6 +1752,10 @@ export default function (pi: ExtensionAPI) {
   // ── 2. before_provider_request: read-only prefix snapshot; optional strip of legacy retention ──
   pi.on("before_provider_request", (event, ctx) => {
     if (!state.runtimeEnabled) return;
+    // TPS t0: mark the start of this provider request. Tool loops fire this hook
+    // once per request; the last one before turn_end wins, so the elapsed time
+    // matches the request whose assistant usage turn_end reports.
+    state.providerRequestStartedAt = Date.now();
     try {
       if (state.prefixDiagEnabled) observePrefixDiagnostics(state, event.payload, ctx);
     } catch {
@@ -1781,6 +1845,10 @@ export default function (pi: ExtensionAPI) {
     if (event.message) {
       recordTurnUsage(state, event.message);
     }
+    // Estimate TPS from this turn's t0 and this assistant message's output tokens,
+    // then consume t0 so a following turn without its own provider request shows n/a.
+    state.lastTurnTps = computeTurnTps(state, event.message);
+    state.providerRequestStartedAt = null;
     readFooterCtx(state, ctx);
     refreshFooter(state, false);
   });
