@@ -40,11 +40,22 @@ A 400 with only status/headers is recorded as unknown. Subsequent cache strategy
 
 ### 5. Cache guard
 
-With `PI_CACHE_GUARD=1`, a warning is emitted at session end if the aggregate hit rate falls below the threshold (default 90%). Disabled instances do not warn.
+With `PI_CACHE_GUARD=1`, a warning is emitted at session end if the hit rate falls below the threshold (default 90%). Disabled instances do not warn.
+
+The guard uses **any-breach** semantics (current run first), so a resumed long session never lets historical highs dilute a current regression:
+- If the **current run** (this process since `session_start`, the `state.snapshot` window) is below the threshold, it warns immediately — even when the all-session aggregate is still above threshold, because the current run is what the guard is designed to catch.
+- Otherwise, if the **all-session aggregate** (full `sessionManager.getEntries()` scope, the same algorithm as the footer's `◆` cumulative rate) is below the threshold, it warns.
+- When it fires from the current-run branch, the warning text reports **both** numbers (e.g. `current run hit=50% < threshold=90% (session aggregate=95%)`), so it never contradicts the number the user sees in the footer.
+- When neither scope has any cache interaction (e.g. a provider without prompt caching), the value is `n/a` and no warning is emitted (no fabricated 0%).
 
 ### 6. Cache statistics
 
 Per-turn `cacheRead` / `cacheWrite` / `input` is recorded while enabled. `/cache-guardian` shows totals. Pi's `usage.input` is net input tokens across all APIs, so hit rate is `cacheRead / (input + cacheRead + cacheWrite)`. Multi-turn aggregation is `sum(cacheRead) / sum(denom)`. Per-turn detail is bounded; cumulative totals are not discarded.
+
+`/cache-guardian` prints **two scopes** so the numbers can never contradict the footer:
+
+- `Aggregate hit ... (current run; ...)` — this process since `session_start` (the `state.snapshot` window used for per-turn reports).
+- `Session aggregate ... (all session, footer scope; ...)` — the full session entries, the same algorithm the footer's `◆` cumulative rate uses (includes historical rounds after a resume).
 
 String length in diagnostics is **character count**, not UTF-8 bytes. Dividing by 4 is a rough estimate, not an exact token count.
 
@@ -66,10 +77,13 @@ Pi-native provider behavior stays first. Unknown endpoints keep host/user config
 
 ### 8. Live TUI footer (default on)
 
-When running in TUI mode, the footer updates in real time during long-running tasks rather than waiting only for the final `agent_end` event:
-- **Refresh triggers:** Cache hit rate is accumulated and refreshed at each LLM `turn_end`, while context window usage is refreshed at `tool_execution_start` and `tool_execution_end`.
-- **Throttled rendering:** High-frequency event paths use TUI 16ms render throttling (`requestRender()` non-force) without forced repaints, while low-frequency events (`agent_end`, `model_select`, `thinking_level_select`, and `/cache-guardian reset`) use forced redraws (`force=true`).
-- **Single-entry accumulation:** Token usage is accumulated solely at `turn_end` into a run-level `liveRun` buffer (settled directly at `agent_end` without re-scanning messages), preventing double-counting.
+When running in TUI mode, the footer renders stats calculated in real time at render-time (mirroring Pi's official footer behavior) rather than displaying static event snapshots:
+- **Render-time live calculation:** Cache hit rate is computed dynamically during `render()` across all `sessionManager.getEntries()`, while context window usage is fetched via `getContextUsage()`.
+- **Dual hit-rate display:** Cache hit rate shows both cumulative and latest rates: `◆ <cumulative>% ◇ <latest>%` (e.g. `◆ 87% ◇ 95%`). The `◆` cumulative rate uses the default text color, while the `◇` latest round rate uses the warning color. Items display `n/a` when there is no cache interaction yet (cacheRead=0 and cacheWrite=0, e.g. a provider without prompt caching) — never a fabricated `0%`. The latest round (`◇`) is always the newest assistant response: a later round with no `usage` field or no cache interaction shows `n/a` instead of a stale previous value.
+- **Context occupancy colors:** The `▲` context segment mirrors the official footer thresholds — `>90%` uses the error color, `>70%` uses the warning color, otherwise the default text color. Other footer segments are unaffected.
+- **Refresh triggers:** High-frequency events (`turn_end`, `tool_execution_start`, `tool_execution_end`) trigger throttled 16ms footer repaints, while low-frequency events (`agent_end`, `model_select`, `thinking_level_select`, `/cache-guardian reset`) trigger immediate force redraws.
+- **Dirty-check caching:** The live hit-rate scan is cached and only recomputed when the entry count changes; `/cache-guardian reset` and session changes invalidate the cache (a reset watermark makes the footer count only entries appended after the reset, so it shows `n/a` until new usage arrives; if the entry list is ever shorter than the watermark a safe `n/a` fallback is used). Context usage is always fetched fresh.
+- **Single-entry accumulation:** Token usage is accumulated at `turn_end` into a run-level `liveRun` buffer (settled directly at `agent_end` without re-scanning messages), preventing double-counting in command statistics.
 
 ## Install
 
@@ -114,11 +128,11 @@ cp pi-cache-guardian/extensions/cache-guardian.ts ~/.pi/agent/extensions/
 ## Commands
 
 ```
-/cache-guardian          # Show current-run cache statistics (includes a short prefix-status line)
+/cache-guardian          # Show cache statistics (current run + all-session scopes, incl. a short prefix-status line)
 /cache-guardian prefix   # Show the latest prefix-change snapshot (categories/status/lengths only)
 /cache-guardian disable  # Disable this instance (no stats writes, no footer, no payload edits, no prefix updates)
 /cache-guardian enable   # Re-enable (footer only if TUI and FOOTER is on)
-/cache-guardian reset    # Reset current-run statistics, unclassified 400 list, and prefix comparison state; refresh footer
+/cache-guardian reset    # Reset current-run statistics, unclassified 400 list, and prefix comparison state; reset the footer live view to post-reset entries only; refresh footer
 ```
 
 ## Tests

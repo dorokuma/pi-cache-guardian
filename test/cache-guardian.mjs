@@ -19,7 +19,7 @@ import {
 
 isolateCacheEnv();
 
-const { default: guardianFactory, cacheHitPct, aggregateHit } = await import("../extensions/cache-guardian.ts");
+const { default: guardianFactory, cacheHitPct, aggregateHit, createInstanceState, resetRunState, readFooterCtx } = await import("../extensions/cache-guardian.ts");
 const loaded = await loadSdk();
 const { ExtensionRunner, buildSystemPrompt, version: sdkVersion } = loaded;
 console.log(`SDK under test: ${sdkVersion} (${loaded.dist})`);
@@ -929,6 +929,515 @@ function compactableSkillSet() {
   ok("Live footer updates on turn_end and tool execution start/end");
 }
 
+// ── Live footer computation from sessionManager.getEntries() with dual hit rate (◆/◇) ──
+{
+  let footerComponent = null;
+  const sessionEntries = [];
+  const styleCalls = [];
+  const trackingTheme = {
+    fg: (style, text) => {
+      styleCalls.push({ style, text });
+      if (style === "warning") return `[WARN:${text}]`;
+      if (style === "text") return `[TXT:${text}]`;
+      if (style === "dim") return `[DIM:${text}]`;
+      return text;
+    },
+  };
+
+  const ctx = mockContext({
+    mode: "tui",
+    model: { name: "GPT-4o (openai)" },
+    sessionManager: {
+      getSessionId: () => "live-session",
+      appendCustomEntry() {},
+      getEntries: () => sessionEntries,
+    },
+    getContextUsage: () => ({ tokens: 40000, contextWindow: 128000, percent: 31.25 }),
+    ui: {
+      notify() {},
+      setFooter(factory) {
+        if (typeof factory === "function") {
+          footerComponent = factory(
+            { requestRender: () => {} },
+            trackingTheme,
+            { getExtensionStatuses: () => new Map() }
+          );
+        }
+      },
+    },
+  });
+
+  const { ext } = await fresh(ctx);
+  assert.ok(footerComponent, "footer should be installed");
+
+  // 1. Initial render with empty entries -> ◆ n/a ◇ n/a
+  const initialLine = footerComponent.render(120)[0];
+  assert.match(initialLine, /◆.*n\/a.*◇.*n\/a/);
+  assert.match(initialLine, /▲.*31%\/128K/);
+
+  // 2. Add Turn 1: assistant message with 80% hit rate
+  sessionEntries.push({
+    type: "message",
+    message: {
+      role: "assistant",
+      usage: { input: 200, cacheRead: 800, cacheWrite: 0 },
+    },
+  });
+  const turn1Line = footerComponent.render(120)[0];
+  // Both aggregate and latest are 80%
+  assert.match(turn1Line, /\[TXT:80%\]/);
+  assert.match(turn1Line, /\[WARN:80%\]/);
+
+  // 3. Add toolResult (50% cache hit) -> aggregate changes to 75%, latest remains 80%
+  sessionEntries.push({
+    type: "message",
+    message: {
+      role: "toolResult",
+      usage: { input: 100, cacheRead: 100, cacheWrite: 0 },
+    },
+  });
+  const toolResultLine = footerComponent.render(120)[0];
+  assert.match(toolResultLine, /\[TXT:75%\]/);
+  assert.match(toolResultLine, /\[WARN:80%\]/);
+
+  // 4. Add Turn 2: assistant message with 95% hit rate
+  sessionEntries.push({
+    type: "message",
+    message: {
+      role: "assistant",
+      usage: { input: 50, cacheRead: 950, cacheWrite: 0 },
+    },
+  });
+  const turn2Line = footerComponent.render(120)[0];
+  // Aggregate: (800+100+950)/(1000+200+1000) = 1850/2200 = 84%
+  // Latest: 950/1000 = 95%
+  assert.match(turn2Line, /\[TXT:84%\]/);
+  assert.match(turn2Line, /\[WARN:95%\]/);
+
+  // 5. Check robustness when getEntries throws -> fall back to snapshot without throwing
+  // (append an entry first so the dirty-check cache key changes and getEntries is really called)
+  sessionEntries.push({
+    type: "message",
+    message: {
+      role: "assistant",
+      usage: { input: 100, cacheRead: 900, cacheWrite: 0 },
+    },
+  });
+  ctx.sessionManager.getEntries = () => { throw new Error("session broken"); };
+  const fallbackLine = footerComponent.render(120)[0];
+  assert.ok(typeof fallbackLine === "string");
+  assert.ok(!fallbackLine.includes("Error"));
+  // Snapshot was never written in this test, so the fallback shows n/a
+  assert.match(fallbackLine, /n\/a/);
+
+  ok("Live footer computes dual hit rates from sessionManager with warning color on latest");
+}
+
+// ── Footer fixes: n/a for no-cache models, latest residue cleared, reset watermark, dirty-check cache ──
+{
+  const sessionEntries = [];
+  let getEntriesCalls = 0;
+  let footerComponent = null;
+  const trackingTheme = {
+    fg: (style, text) => {
+      if (style === "warning") return `[WARN:${text}]`;
+      if (style === "error") return `[ERR:${text}]`;
+      if (style === "text") return `[TXT:${text}]`;
+      if (style === "dim") return `[DIM:${text}]`;
+      return text;
+    },
+  };
+
+  const ctx = mockContext({
+    mode: "tui",
+    model: { name: "no-cache-model" },
+    sessionManager: {
+      getEntries: () => {
+        getEntriesCalls += 1;
+        return sessionEntries;
+      },
+    },
+    getContextUsage: () => ({ tokens: 2000, contextWindow: 10000, percent: 20 }),
+    ui: {
+      notify() {},
+      setFooter(factory) {
+        if (typeof factory === "function") {
+          footerComponent = factory(
+            { requestRender: () => {} },
+            trackingTheme,
+            { getExtensionStatuses: () => new Map() },
+          );
+        }
+      },
+    },
+  });
+
+  const { ext } = await fresh(ctx);
+  assert.ok(footerComponent, "footer should be installed");
+
+  // 1. Empty entries -> ◆ n/a ◇ n/a (no stale 0%)
+  assert.match(footerComponent.render(120)[0], /\[DIM:n\/a\]/);
+  assert.equal(getEntriesCalls, 1);
+
+  // 2. Cache round A -> ◆ 50% ◇ 50%
+  sessionEntries.push({
+    type: "message",
+    message: { role: "assistant", usage: { input: 500, cacheRead: 500, cacheWrite: 0 } },
+  });
+  assert.match(footerComponent.render(120)[0], /\[TXT:50%\]/);
+  assert.equal(getEntriesCalls, 2);
+
+  // 3. Dirty-check cache: in-place change with SAME entry count reuses the result
+  //    (scan skipped; key = epoch|resetBaseline|entryCount)
+  sessionEntries[0].message.usage.cacheRead = 999; // would show 67% if rescanned
+  const reusedLine = footerComponent.render(120)[0];
+  assert.match(reusedLine, /\[TXT:50%\]/, "same entry count must reuse previous result");
+  assert.equal(getEntriesCalls, 3, "no recompute when entry count is unchanged");
+  sessionEntries[0].message.usage.cacheRead = 500; // revert for clean math below
+
+  // 4. No-cache round B -> ◇ n/a (no residue from A), ◆ 25%; never 0%
+  sessionEntries.push({
+    type: "message",
+    message: { role: "assistant", usage: { input: 1000, cacheRead: 0, cacheWrite: 0 } },
+  });
+  const noCacheLine = footerComponent.render(120)[0];
+  assert.match(noCacheLine, /\[TXT:25%\]/);
+  assert.match(noCacheLine, /\[DIM:n\/a\]/);
+  assert.ok(!noCacheLine.includes("[TXT:0%]"), "no-cache model must not show 0%");
+  assert.ok(!noCacheLine.includes("[WARN:0%]"), "no-cache model must not show 0% latest");
+  assert.equal(getEntriesCalls, 4);
+
+  // 5. Cache round C -> ◆ 47% ◇ 90%
+  sessionEntries.push({
+    type: "message",
+    message: { role: "assistant", usage: { input: 100, cacheRead: 900, cacheWrite: 0 } },
+  });
+  const cachedLine = footerComponent.render(120)[0];
+  assert.match(cachedLine, /\[TXT:47%\]/);
+  assert.match(cachedLine, /\[WARN:90%\]/);
+  assert.equal(getEntriesCalls, 5);
+
+  // 6. /cache-guardian reset -> watermark set to 3 entries -> footer n/a
+  //    (reset handler reads getEntries once, then render misses the epoch bump)
+  await ext.commands.get("cache-guardian").handler("reset", ctx);
+  assert.equal(getEntriesCalls, 6);
+  const resetLine = footerComponent.render(120)[0];
+  assert.match(resetLine, /\[DIM:n\/a\]/);
+  assert.equal(getEntriesCalls, 7);
+
+  // 7. New entry after reset -> only that entry counts: 100/200 = 50%
+  sessionEntries.push({
+    type: "message",
+    message: { role: "assistant", usage: { input: 100, cacheRead: 100, cacheWrite: 0 } },
+  });
+  const afterResetLine = footerComponent.render(120)[0];
+  assert.match(afterResetLine, /\[TXT:50%\]/);
+  assert.match(afterResetLine, /\[WARN:50%\]/);
+  assert.equal(getEntriesCalls, 8);
+
+  ok("Footer shows n/a for no-cache rounds, clears latest residue, applies reset watermark, caches unchanged renders");
+}
+
+// ── Context occupancy danger colors (footer segment only) ──
+{
+  let footerComponent = null;
+  const styleCalls = [];
+  const colorTheme = {
+    fg: (style, text) => {
+      styleCalls.push({ style, text });
+      return `[${style.toUpperCase()}:${text}]`;
+    },
+  };
+  let currentUsage = { tokens: 5000, contextWindow: 10000, percent: 50 };
+
+  const ctx = mockContext({
+    mode: "tui",
+    model: { name: "ctx-color-model" },
+    getContextUsage: () => currentUsage,
+    ui: {
+      notify() {},
+      setFooter(factory) {
+        if (typeof factory === "function") {
+          footerComponent = factory(
+            { requestRender: () => {} },
+            colorTheme,
+            { getExtensionStatuses: () => new Map() },
+          );
+        }
+      },
+    },
+  });
+
+  const { ext } = await fresh(ctx);
+  assert.ok(footerComponent, "footer should be installed");
+
+  currentUsage = { tokens: 5000, contextWindow: 10000, percent: 50 };
+  const line50 = footerComponent.render(120)[0];
+  assert.match(line50, /\[TEXT:50%\/10K\]/);
+
+  currentUsage = { tokens: 8000, contextWindow: 10000, percent: 80 };
+  const line80 = footerComponent.render(120)[0];
+  assert.match(line80, /\[WARNING:80%\/10K\]/);
+
+  currentUsage = { tokens: 9500, contextWindow: 10000, percent: 95 };
+  const line95 = footerComponent.render(120)[0];
+  assert.match(line95, /\[ERROR:95%\/10K\]/);
+
+  // Non-context segments keep their own colors: ◆/◇ n/a dim, model text
+  assert.match(line95, /\[DIM:n\/a\]/);
+  assert.match(line95, /\[TEXT:ctx-color-model/);
+  assert.ok(!line95.includes("[ERROR:n/a]"), "error color must not leak outside context segment");
+  assert.ok(!line95.includes("[WARNING:n/a]"), "warning color must not leak outside context segment");
+
+  ok("Context segment colors by occupancy (>90 error, >70 warning) without touching other segments");
+}
+
+// ── Dual-scope command output: Session aggregate vs current run ──
+{
+  const sessionEntries = [
+    { type: "message", message: { role: "assistant", usage: { input: 200, cacheRead: 800, cacheWrite: 0 } } },
+    { type: "message", message: { role: "assistant", usage: { input: 50, cacheRead: 950, cacheWrite: 0 } } },
+  ];
+  const ctx = mockContext({
+    sessionManager: {
+      getSessionId: () => "test-session",
+      appendCustomEntry: () => {},
+      getEntries: () => sessionEntries,
+    },
+  });
+  const { ext } = await fresh(ctx);
+
+  // Current run: 100% cache hit
+  await fire(ext, "turn_end", ctx, {
+    turnIndex: 0,
+    message: { role: "assistant", usage: { input: 0, cacheRead: 500, cacheWrite: 0 } },
+    toolResults: [],
+  });
+  await fire(ext, "agent_end", ctx, {
+    messages: [{ role: "assistant", usage: { input: 0, cacheRead: 500, cacheWrite: 0 } }],
+  });
+
+  ctx.notices.length = 0;
+  await ext.commands.get("cache-guardian").handler("", ctx);
+  const stats = ctx.notices.map((n) => n[0]).join("\n");
+  assert.match(stats, /Aggregate hit: 100%  \(current run; read=500 \/ denom=500\)/);
+  assert.match(stats, /Session aggregate: 88%  \(all session, footer scope; read=1750 \/ denom=2000\)/);
+
+  // Repetition: session aggregate stays available even when the footer was never installed
+  const printCtx = mockContext({
+    mode: "print",
+    sessionManager: {
+      getSessionId: () => "test-session",
+      appendCustomEntry: () => {},
+      getEntries: () => sessionEntries,
+    },
+  });
+  const { ext: ext2 } = await fresh(printCtx);
+  printCtx.notices.length = 0;
+  await ext2.commands.get("cache-guardian").handler("", printCtx);
+  const stats2 = printCtx.notices.map((n) => n[0]).join("\n");
+  assert.match(stats2, /Session aggregate: 88%/);
+
+  ok("Command prints both current-run and all-session (footer) aggregates");
+}
+
+// ── Cache guard: any-breach alert (current run first, then all-session) ──
+// ② current run high + all-session low -> warn via the all-session fallback branch
+{
+  process.env.PI_CACHE_GUARD = "1";
+  const lowSessionEntries = [
+    { type: "message", message: { role: "assistant", usage: { input: 1000, cacheRead: 100, cacheWrite: 0 } } },
+  ];
+  const ctx = mockContext({
+    sessionManager: {
+      getSessionId: () => "test-session",
+      appendCustomEntry: () => {},
+      getEntries: () => lowSessionEntries,
+    },
+  });
+  const { ext } = await fresh(ctx);
+  // Current run is 95% (high), so the current-run branch skips; the all-session
+  // aggregate is 9% (low) and must still warn (any breach alerts).
+  await fire(ext, "turn_end", ctx, {
+    turnIndex: 0,
+    message: { role: "assistant", usage: { input: 100, cacheRead: 1900, cacheWrite: 0 } },
+    toolResults: [],
+  });
+  await fire(ext, "agent_end", ctx, {
+    messages: [{ role: "assistant", usage: { input: 100, cacheRead: 1900, cacheWrite: 0 } }],
+  });
+  ctx.notices.length = 0;
+  await fire(ext, "session_shutdown", ctx);
+  const warns = ctx.notices.filter((n) => String(n[0]).includes("Cache guard"));
+  assert.equal(warns.length, 1, "guard must warn once when all-session aggregate is below threshold");
+  const msg = String(warns[0][0]);
+  assert.match(msg, /session aggregate=9%/);
+  assert.ok(!msg.includes("current run"), "this is the all-session branch, so no current-run text");
+  delete process.env.PI_CACHE_GUARD;
+  ok("Guard: current run high + all-session low -> warns via all-session branch");
+}
+
+// ① current run low + all-session high -> warn via the current-run branch, text has both numbers
+{
+  process.env.PI_CACHE_GUARD = "1";
+  const highSessionEntries = [
+    { type: "message", message: { role: "assistant", usage: { input: 50, cacheRead: 950, cacheWrite: 0 } } }, // 95%
+  ];
+  const ctx = mockContext({
+    sessionManager: {
+      getSessionId: () => "test-session",
+      appendCustomEntry: () => {},
+      getEntries: () => highSessionEntries,
+    },
+  });
+  const { ext } = await fresh(ctx);
+  // Current run is 50% (low); a resumed long session's historical high (95%)
+  // must not dilute this regression away.
+  await fire(ext, "turn_end", ctx, {
+    turnIndex: 0,
+    message: { role: "assistant", usage: { input: 500, cacheRead: 500, cacheWrite: 0 } },
+    toolResults: [],
+  });
+  await fire(ext, "agent_end", ctx, {
+    messages: [{ role: "assistant", usage: { input: 500, cacheRead: 500, cacheWrite: 0 } }],
+  });
+  ctx.notices.length = 0;
+  await fire(ext, "session_shutdown", ctx);
+  const warns = ctx.notices.filter((n) => String(n[0]).includes("Cache guard"));
+  assert.equal(warns.length, 1, "guard must warn when current run is below threshold");
+  const msg = String(warns[0][0]);
+  assert.match(msg, /current run hit=50%/);
+  assert.match(msg, /session aggregate=95%/);
+  delete process.env.PI_CACHE_GUARD;
+  ok("Guard: current run low + all-session high -> warns with both numbers");
+}
+
+// ③ current run high + all-session high -> silent
+{
+  process.env.PI_CACHE_GUARD = "1";
+  const highSessionEntries = [
+    { type: "message", message: { role: "assistant", usage: { input: 50, cacheRead: 950, cacheWrite: 0 } } }, // 95%
+  ];
+  const ctx = mockContext({
+    sessionManager: {
+      getSessionId: () => "test-session",
+      appendCustomEntry: () => {},
+      getEntries: () => highSessionEntries,
+    },
+  });
+  const { ext } = await fresh(ctx);
+  await fire(ext, "turn_end", ctx, {
+    turnIndex: 0,
+    message: { role: "assistant", usage: { input: 100, cacheRead: 1900, cacheWrite: 0 } },
+    toolResults: [],
+  });
+  await fire(ext, "agent_end", ctx, {
+    messages: [{ role: "assistant", usage: { input: 100, cacheRead: 1900, cacheWrite: 0 } }],
+  });
+  ctx.notices.length = 0;
+  await fire(ext, "session_shutdown", ctx);
+  const warns = ctx.notices.filter((n) => String(n[0]).includes("Cache guard"));
+  assert.equal(warns.length, 0, "guard must stay silent when current run and all-session are both above threshold");
+  delete process.env.PI_CACHE_GUARD;
+  ok("Guard: current run high + all-session high -> silent");
+}
+
+{
+  process.env.PI_CACHE_GUARD = "1";
+  const noCacheSession = [
+    { type: "message", message: { role: "assistant", usage: { input: 1000, cacheRead: 0, cacheWrite: 0 } } },
+  ];
+  const ctx = mockContext({
+    sessionManager: {
+      getSessionId: () => "test-session",
+      appendCustomEntry: () => {},
+      getEntries: () => noCacheSession,
+    },
+  });
+  const { ext } = await fresh(ctx);
+  // Current run is 100% (high) and session scope has no cache (n/a): no breach, so
+  // the guard stays silent (matches the footer's n/a, never a fabricated 0%).
+  await fire(ext, "turn_end", ctx, {
+    turnIndex: 0,
+    message: { role: "assistant", usage: { input: 0, cacheRead: 500, cacheWrite: 0 } },
+    toolResults: [],
+  });
+  await fire(ext, "agent_end", ctx, {
+    messages: [{ role: "assistant", usage: { input: 0, cacheRead: 500, cacheWrite: 0 } }],
+  });
+  ctx.notices.length = 0;
+  await fire(ext, "session_shutdown", ctx);
+  const warns = ctx.notices.filter((n) => String(n[0]).includes("Cache guard"));
+  assert.equal(warns.length, 0, "guard must not warn when current run is high and session scope has no cache usage");
+  delete process.env.PI_CACHE_GUARD;
+  ok("Guard stays silent when all-session aggregate is n/a and current run is high");
+}
+
+// ④ all-session n/a + current run low -> warn via the current-run branch (text shows both)
+{
+  process.env.PI_CACHE_GUARD = "1";
+  const noCacheSession = [
+    { type: "message", message: { role: "assistant", usage: { input: 1000, cacheRead: 0, cacheWrite: 0 } } },
+  ];
+  const ctx = mockContext({
+    sessionManager: {
+      getSessionId: () => "test-session",
+      appendCustomEntry: () => {},
+      getEntries: () => noCacheSession,
+    },
+  });
+  const { ext } = await fresh(ctx);
+  // Current run is 30% (low) while the all-session scope has no cache (n/a): the
+  // current-run branch must fire (it is what the guard is designed to catch).
+  await fire(ext, "turn_end", ctx, {
+    turnIndex: 0,
+    message: { role: "assistant", usage: { input: 700, cacheRead: 300, cacheWrite: 0 } },
+    toolResults: [],
+  });
+  await fire(ext, "agent_end", ctx, {
+    messages: [{ role: "assistant", usage: { input: 700, cacheRead: 300, cacheWrite: 0 } }],
+  });
+  ctx.notices.length = 0;
+  await fire(ext, "session_shutdown", ctx);
+  const warns = ctx.notices.filter((n) => String(n[0]).includes("Cache guard"));
+  assert.equal(warns.length, 1, "guard must warn when current run is low even if all-session is n/a");
+  const msg = String(warns[0][0]);
+  assert.match(msg, /current run hit=30%/);
+  assert.match(msg, /session aggregate=n\/a/);
+  delete process.env.PI_CACHE_GUARD;
+  ok("Guard: all-session n/a + current run low -> warns via current-run branch");
+}
+
+// ⑤ current run n/a + all-session n/a -> silent
+{
+  process.env.PI_CACHE_GUARD = "1";
+  const noCacheSession = [
+    { type: "message", message: { role: "assistant", usage: { input: 1000, cacheRead: 0, cacheWrite: 0 } } },
+  ];
+  const ctx = mockContext({
+    sessionManager: {
+      getSessionId: () => "test-session",
+      appendCustomEntry: () => {},
+      getEntries: () => noCacheSession,
+    },
+  });
+  const { ext } = await fresh(ctx);
+  await fire(ext, "turn_end", ctx, {
+    turnIndex: 0,
+    message: { role: "assistant", usage: { input: 1000, cacheRead: 0, cacheWrite: 0 } },
+    toolResults: [],
+  });
+  await fire(ext, "agent_end", ctx, {
+    messages: [{ role: "assistant", usage: { input: 1000, cacheRead: 0, cacheWrite: 0 } }],
+  });
+  ctx.notices.length = 0;
+  await fire(ext, "session_shutdown", ctx);
+  const warns = ctx.notices.filter((n) => String(n[0]).includes("Cache guard"));
+  assert.equal(warns.length, 0, "guard must stay silent when neither scope has cache data");
+  delete process.env.PI_CACHE_GUARD;
+  ok("Guard: both current run and all-session n/a -> silent");
+}
+
 // ── Regression: (a) No double counting when turn_end followed by agent_end ──
 {
   const { ext, ctx } = await fresh();
@@ -1225,6 +1734,57 @@ function compactableSkillSet() {
   });
 
   ok("Regression: 100% cache hit (input=0, cacheRead>0 in liveRun) does not trigger agent_end fallback");
+}
+
+// ── Lifecycle: resetRunState clears footerSources; readFooterCtx never inherits stale ctx refs ──
+{
+  const state = createInstanceState(true);
+  state.footerSources = {
+    sessionManager: { getEntries: () => [] },
+    getContextUsage: () => ({}),
+  };
+  resetRunState(state);
+  assert.equal(state.footerSources, null, "resetRunState must clear footerSources (no stale cross-session reference)");
+  ok("Lifecycle: resetRunState clears footerSources");
+}
+
+{
+  const state = createInstanceState(true);
+  const oldCtx = {
+    model: { name: "old-model" },
+    thinkingLevel: "off",
+    sessionManager: { getEntries: () => [] },
+    getContextUsage: () => ({ tokens: 10, contextWindow: 100, percent: 10 }),
+  };
+  readFooterCtx(state, oldCtx);
+  assert.ok(state.footerSources, "footerSources captured when ctx provides sources");
+  assert.equal(typeof state.footerSources.getContextUsage, "function", "getContextUsage captured as a bound function");
+  const oldBound = state.footerSources.getContextUsage;
+
+  // New ctx has a sessionManager but NO getContextUsage: must not inherit the old
+  // bound function (which would keep the old ctx alive and call the wrong object).
+  const newCtx = {
+    model: { name: "new-model" },
+    thinkingLevel: "high",
+    sessionManager: { getEntries: () => [] },
+  };
+  readFooterCtx(state, newCtx);
+  assert.ok(state.footerSources, "footerSources stays set when ctx still provides a sessionManager");
+  assert.notEqual(state.footerSources.getContextUsage, oldBound, "must NOT inherit the old bound getContextUsage");
+  assert.equal(state.footerSources.getContextUsage, undefined, "missing getContextUsage is undefined, not a stale reference");
+  ok("Lifecycle: readFooterCtx drops stale getContextUsage reference when new ctx lacks it");
+}
+
+{
+  const state = createInstanceState(true);
+  state.footerSources = {
+    sessionManager: { getEntries: () => [] },
+    getContextUsage: () => ({}),
+  };
+  // ctx without either source -> footerSources nulled, no reference carried over
+  readFooterCtx(state, { model: { name: "sources-less" } });
+  assert.equal(state.footerSources, null, "footerSources should be null when ctx provides neither source");
+  ok("Lifecycle: readFooterCtx nulls footerSources when ctx provides neither source");
 }
 
 console.log(`All cache-guardian regressions passed (${passed} cases, sdk=${sdkVersion})`);

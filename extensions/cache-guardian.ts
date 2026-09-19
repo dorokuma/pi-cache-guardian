@@ -131,6 +131,100 @@ export function aggregateHit(totalRead: number, totalDenom: number): number | nu
   return Math.round((totalRead / totalDenom) * 100);
 }
 
+type LiveHitScan = {
+  totalCacheRead: number;
+  totalCacheWrite: number;
+  totalDenom: number;
+  latest: number | null;
+};
+
+/**
+ * Scan session entries from `start` (inclusive) and accumulate cache counters.
+ * - assistant messages set `latest` unconditionally: role and usage are decoupled.
+ *   A newer assistant round with usage sets/clears `latest` from its own numbers;
+ *   a newer assistant round *without* usage (interrupt / error / injected message)
+ *   clears `latest` to null and does not accumulate, so no stale value survives.
+ * - toolResult / branch_summary / compaction usage counts towards aggregate only
+ */
+function scanLiveHitRates(entries: any[], start: number): LiveHitScan {
+  let totalCacheRead = 0;
+  let totalCacheWrite = 0;
+  let totalDenom = 0;
+  let latest: number | null = null;
+
+  for (let i = start; i < entries.length; i++) {
+    const entry = entries[i];
+    if (!entry || typeof entry !== "object") continue;
+
+    if (entry.type === "message" && entry.message && typeof entry.message === "object") {
+      if (entry.message.role === "assistant") {
+        if (entry.message.usage) {
+          const norm = normalizeUsage(entry.message.usage);
+          const denom = cacheHitDenom(norm);
+          totalCacheRead += norm.cacheRead;
+          totalCacheWrite += norm.cacheWrite;
+          totalDenom += denom;
+          latest = (denom > 0 && (norm.cacheRead > 0 || norm.cacheWrite > 0))
+            ? aggregateHit(norm.cacheRead, denom)
+            : null;
+        } else {
+          // Assistant without usage: do not accumulate, but reset latest so the
+          // footer never shows a stale value from an earlier round.
+          latest = null;
+        }
+      } else if (entry.message.role === "toolResult" && entry.message.usage) {
+        const norm = normalizeUsage(entry.message.usage);
+        const denom = cacheHitDenom(norm);
+        totalCacheRead += norm.cacheRead;
+        totalCacheWrite += norm.cacheWrite;
+        totalDenom += denom;
+      }
+    } else if ((entry.type === "branch_summary" || entry.type === "compaction") && entry.usage) {
+      const norm = normalizeUsage(entry.usage);
+      const denom = cacheHitDenom(norm);
+      totalCacheRead += norm.cacheRead;
+      totalCacheWrite += norm.cacheWrite;
+      totalDenom += denom;
+    }
+  }
+
+  return { totalCacheRead, totalCacheWrite, totalDenom, latest };
+}
+
+/**
+ * Compute live aggregate and latest cache hit rates from session manager entries.
+ * - aggregate: sum(cacheRead) / sum(denom), where denom = input + cacheRead + cacheWrite
+ *   Returns null (n/a) unless at least one entry had cache interaction
+ *   (cacheRead > 0 || cacheWrite > 0); cache-unsupported models show n/a, not 0%.
+ * - latest: cacheRead / denom for the latest role === "assistant" message with usage.
+ *   Each new assistant round overwrites `latest` unconditionally: a round with
+ *   denom 0, no cache interaction (cacheRead === 0 && cacheWrite === 0), or no
+ *   usage field at all yields null, so no stale value survives from an earlier round.
+ * - toolResult / branch_summary / compaction usage counts towards aggregate only
+ * - `resetBaseline` (number of entries at reset time) restricts the scan to entries
+ *   appended after a /cache-guardian reset. If the entry list is now shorter than
+ *   the baseline (trimmed / replaced session), returns null/null (n/a) as a safe
+ *   fallback instead of computing the wrong window.
+ * - returns { aggregate: null, latest: null } when entries are empty or contain no usage
+ */
+export function computeLiveHitRates(entries: any[], resetBaseline?: number | null): {
+  aggregate: number | null;
+  latest: number | null;
+} {
+  if (!Array.isArray(entries) || entries.length === 0) {
+    return { aggregate: null, latest: null };
+  }
+  if (typeof resetBaseline === "number" && resetBaseline >= 0 && entries.length < resetBaseline) {
+    return { aggregate: null, latest: null };
+  }
+  const start = typeof resetBaseline === "number" ? Math.max(0, resetBaseline) : 0;
+  const scan = scanLiveHitRates(entries, start);
+  const aggregate = (scan.totalDenom > 0 && (scan.totalCacheRead > 0 || scan.totalCacheWrite > 0))
+    ? aggregateHit(scan.totalCacheRead, scan.totalDenom)
+    : null;
+  return { aggregate, latest: scan.latest };
+}
+
 /**
  * Compute the denominator for cache hit rate calculation:
  * `input + cacheRead + cacheWrite`
@@ -251,6 +345,17 @@ type InstanceState = {
   footerModelName: string;
   footerThinking: string | undefined;
   footerContext: FooterContext;
+  footerSources: {
+    sessionManager?: any;
+    getContextUsage?: () => any;
+  } | null;
+  footerResetEpoch: number;
+  footerResetBaseline: number | null;
+  footerHitCache: {
+    key: string;
+    aggregate: number | null;
+    latest: number | null;
+  } | null;
   footerInstalled: boolean;
   prefixDiagEnabled: boolean;
   prefixSalt: Uint8Array;
@@ -276,7 +381,7 @@ function randomSalt(): Uint8Array {
   return s;
 }
 
-function createInstanceState(prefixDiagEnabled: boolean): InstanceState {
+export function createInstanceState(prefixDiagEnabled: boolean): InstanceState {
   return {
     runtimeEnabled: true,
     snapshot: emptySnapshot(),
@@ -288,6 +393,10 @@ function createInstanceState(prefixDiagEnabled: boolean): InstanceState {
     footerModelName: "",
     footerThinking: undefined,
     footerContext: null,
+    footerSources: null,
+    footerResetEpoch: 0,
+    footerResetBaseline: null,
+    footerHitCache: null,
     footerInstalled: false,
     prefixDiagEnabled,
     prefixSalt: randomSalt(),
@@ -301,18 +410,29 @@ function clearPrefixMemory(state: InstanceState): void {
   state.lastPrefixDiag = null;
 }
 
-function resetRunState(state: InstanceState): void {
+export function resetRunState(state: InstanceState): void {
   state.snapshot = emptySnapshot();
   state.liveRun = emptyLiveRun();
   state.turnReports = [];
   state.unknown400.clear();
   state.firstPromptChars = null;
   clearPrefixMemory(state);
+  // Drop the captured ctx references (sessionManager / bound getContextUsage) so a
+  // new session never keeps stale functions bound to a previous ctx. Re-capture
+  // happens on the next readFooterCtx call (session_start / turn_end / tools /
+  // model / thinking events). Invalidate footer live-hit cache and force a fresh
+  // baseline on the next /cache-guardian reset. session_start keeps baseline null
+  // so the footer keeps the all-session scope (full history) after resume/switch;
+  // the /reset command sets the baseline to the current entry count right after.
+  state.footerSources = null;
+  state.footerResetEpoch += 1;
+  state.footerResetBaseline = null;
+  state.footerHitCache = null;
 }
 
 // ── Custom footer ────────────────────────────────────────────────────
 // Unified geometric icon set (user requirement: one symbol family, no emoji+mixin).
-const FOOTER_ICON = { sheep: "●", hit: "◆", context: "▲", model: "■" };
+const FOOTER_ICON = { sheep: "●", hit: "◆", hitLatest: "◇", context: "▲", model: "■" };
 
 function estimateTokens(chars: number): number {
   return Math.round(chars / 4);
@@ -400,10 +520,33 @@ function stripProvider(name: string): string {
   return name.replace(/ \([^)]*\)$/, "");
 }
 
-function readFooterCtx(state: InstanceState, ctx: any): void {
+/**
+ * Colorize the context segment by occupancy, mirroring Pi's official footer:
+ * percent > 90 -> error, > 70 -> warning, otherwise default text color.
+ */
+function contextSegment(theme: any, percent: number, display: string): string {
+  if (percent > 90) return theme.fg("error", display);
+  if (percent > 70) return theme.fg("warning", display);
+  return theme.fg("text", display);
+}
+
+export function readFooterCtx(state: InstanceState, ctx: any): void {
   try {
     state.footerModelName = ctx?.model?.name ?? "";
     state.footerThinking = ctx?.thinkingLevel;
+    if (ctx?.sessionManager || ctx?.getContextUsage) {
+      // Re-capture only what this ctx actually provides; never inherit a reference
+      // from a previous session (a bound getContextUsage would keep the old ctx
+      // alive and call the wrong object after a session switch).
+      state.footerSources = {
+        sessionManager: ctx?.sessionManager,
+        getContextUsage: typeof ctx?.getContextUsage === "function"
+          ? ctx.getContextUsage.bind(ctx)
+          : undefined,
+      };
+    } else {
+      state.footerSources = null;
+    }
     const cu = typeof ctx?.getContextUsage === "function" ? ctx.getContextUsage() : undefined;
     state.footerContext = cu && typeof cu === "object"
       ? { tokens: cu.tokens ?? null, contextWindow: cu.contextWindow ?? 0, percent: cu.percent ?? null }
@@ -514,6 +657,9 @@ function shouldInstallFooter(footerOn: boolean, mode: string | undefined): boole
 function uninstallFooter(state: InstanceState, ui: any): void {
   ui?.setFooter?.(undefined);
   state.footerTui = null;
+  state.footerSources = null;
+  state.footerContext = null;
+  state.footerHitCache = null;
   state.footerInstalled = false;
 }
 
@@ -531,19 +677,69 @@ function installFooter(state: InstanceState, ui: any): void {
         if (herdsmanStatus) {
           parts.push(`${theme.fg("dim", FOOTER_ICON.sheep)} ${theme.fg("text", herdsmanStatus)}`);
         }
-        // 2. cache hit rate (session cumulative) — icon ◆
-        const hit = (state.snapshot.totalCacheRead === 0 && state.snapshot.totalCacheWrite === 0)
-          ? null
-          : aggregateHit(state.snapshot.totalCacheRead, state.snapshot.totalHitDenom);
-        const hitStr = hit === null ? theme.fg("dim", "n/a") : theme.fg("text", `${hit}%`);
-        parts.push(`${theme.fg("dim", FOOTER_ICON.hit)} ${hitStr}`);
+        // 2. cache hit rate (live dual display: cumulative ◆, latest ◇)
+        let agg: number | null = null;
+        let latest: number | null = null;
+        let liveHitComputed = false;
+
+        if (state.footerSources?.sessionManager?.getEntries) {
+          try {
+            const entries = state.footerSources.sessionManager.getEntries();
+            if (Array.isArray(entries)) {
+              // Dirty-check cache: entries are append-only, so length + reset
+              // watermark + epoch identify the exact input window. Reuse the
+              // previous result when nothing changed (O(1) re-render cost).
+              const hitCacheKey = `${state.footerResetEpoch}|${state.footerResetBaseline}|${entries.length}`;
+              if (state.footerHitCache && state.footerHitCache.key === hitCacheKey) {
+                agg = state.footerHitCache.aggregate;
+                latest = state.footerHitCache.latest;
+                liveHitComputed = true;
+              } else {
+                const live = computeLiveHitRates(entries, state.footerResetBaseline);
+                agg = live.aggregate;
+                latest = live.latest;
+                liveHitComputed = true;
+                state.footerHitCache = { key: hitCacheKey, aggregate: agg, latest };
+              }
+            }
+          } catch {
+            // fallback to snapshot
+          }
+        }
+
+        if (!liveHitComputed) {
+          agg = (state.snapshot.totalCacheRead === 0 && state.snapshot.totalCacheWrite === 0)
+            ? null
+            : aggregateHit(state.snapshot.totalCacheRead, state.snapshot.totalHitDenom);
+          latest = null;
+        }
+
+        const aggStr = agg === null ? theme.fg("dim", "n/a") : theme.fg("text", `${agg}%`);
+        const latestStr = latest === null ? theme.fg("dim", "n/a") : theme.fg("warning", `${latest}%`);
+        parts.push(`${theme.fg("dim", FOOTER_ICON.hit)} ${aggStr} ${theme.fg("dim", FOOTER_ICON.hitLatest)} ${latestStr}`);
+
         // 3. context usage — icon ▲ (percent/compact contextWindow)
-        const cu = state.footerContext;
-        const ctxStr = cu && cu.percent !== null && cu.contextWindow
-          ? theme.fg("text", `${Math.round(cu.percent)}%/${formatWindowSize(cu.contextWindow)}`)
-          : cu && cu.percent !== null
-            ? theme.fg("text", `${Math.round(cu.percent)}%`)
-            : theme.fg("dim", "n/a");
+        let cu: FooterContext = state.footerContext;
+        if (state.footerSources?.getContextUsage) {
+          try {
+            const rawCu = state.footerSources.getContextUsage();
+            if (rawCu && typeof rawCu === "object") {
+              cu = {
+                tokens: rawCu.tokens ?? null,
+                contextWindow: rawCu.contextWindow ?? 0,
+                percent: rawCu.percent ?? null,
+              };
+            }
+          } catch {
+            // fallback to state.footerContext
+          }
+        }
+        const cuPercent = cu && cu.percent !== null ? cu.percent : null;
+        const ctxStr = cuPercent === null
+          ? theme.fg("dim", "n/a")
+          : contextSegment(theme, cuPercent, cu && cu.contextWindow
+              ? `${Math.round(cuPercent)}%/${formatWindowSize(cu.contextWindow)}`
+              : `${Math.round(cuPercent)}%`);
         parts.push(`${theme.fg("dim", FOOTER_ICON.context)} ${ctxStr}`);
         // 4. model name + thinking level — icon ■ (single segment, merged)
         if (state.footerModelName) {
@@ -1601,14 +1797,21 @@ export default function (pi: ExtensionAPI) {
     refreshFooter(state, false);
   });
 
-  // ── 5. session_shutdown: cache guard ──
+  // ── 5. session_shutdown: cache guard (any-breach: current run first, then all-session) ──
+  // The current run (since this process's session_start) is the scope the guard is
+  // meant to catch, so a low current run warns even if a resumed long session's
+  // historical highs keep the all-session aggregate above threshold. When the
+  // current run has no data, fall back to the all-session aggregate (footer scope).
   pi.on("session_shutdown", (_event, ctx) => {
     if (!state.runtimeEnabled || !guardEnabled || state.snapshot.turns === 0) return;
-    const agg = (state.snapshot.totalCacheRead === 0 && state.snapshot.totalCacheWrite === 0)
+    const session = readSessionAggregate(ctx);
+    const currentAgg = (state.snapshot.totalCacheRead === 0 && state.snapshot.totalCacheWrite === 0)
       ? null
       : aggregateHit(state.snapshot.totalCacheRead, state.snapshot.totalHitDenom);
-    if (agg !== null && agg < guardThreshold) {
-      ctx.ui.notify(`[${LOG}] Cache guard: aggregate=${agg}% < threshold=${guardThreshold}%. Check /cache-guardian stats.`, "warning");
+    if (currentAgg !== null && currentAgg < guardThreshold) {
+      ctx.ui.notify(`[${LOG}] Cache guard: current run hit=${currentAgg}% < threshold=${guardThreshold}% (session aggregate=${session.aggregate ?? "n/a"}%). Check /cache-guardian stats.`, "warning");
+    } else if (session.available && session.aggregate !== null && session.aggregate < guardThreshold) {
+      ctx.ui.notify(`[${LOG}] Cache guard: session aggregate=${session.aggregate}% < threshold=${guardThreshold}%. Check /cache-guardian stats.`, "warning");
     }
   });
 
@@ -1629,6 +1832,7 @@ export default function (pi: ExtensionAPI) {
   });
   pi.on("thinking_level_select", (_event, ctx) => {
     if (!state.runtimeEnabled) return;
+    readFooterCtx(state, ctx);
     state.footerThinking = ctx.thinkingLevel;
     refreshFooter(state, true);
   });
@@ -1653,6 +1857,7 @@ export default function (pi: ExtensionAPI) {
     }
     if (cmd === "enable") {
       state.runtimeEnabled = true;
+      readFooterCtx(state, ctx);
       if (shouldInstallFooter(footerOn, ctx.mode)) {
         installFooter(state, ctx.ui);
       }
@@ -1661,6 +1866,14 @@ export default function (pi: ExtensionAPI) {
     }
     if (cmd === "reset") {
       resetRunState(state);
+      // Reset live footer scope: only count entries appended after this point.
+      const entries = typeof ctx?.sessionManager?.getEntries === "function"
+        ? ctx.sessionManager.getEntries()
+        : undefined;
+      if (Array.isArray(entries)) {
+        state.footerResetBaseline = entries.length;
+      }
+      readFooterCtx(state, ctx);
       refreshFooter(state, true);
       ctx.ui.notify(`[${LOG}] Current-run cache stats, unclassified 400 list, and prefix diagnostics reset.`, "info");
       return;
@@ -1671,6 +1884,37 @@ export default function (pi: ExtensionAPI) {
     }
     showStats(ctx, state, guardEnabled, guardThreshold, skillCompact, stripRetention);
   }
+}
+
+/**
+ * Read the all-session aggregate (footer algorithm, full entries) from ctx.
+ * - available: true when the session manager exposes readable entries (scope
+ *   is authoritative, even if the result is n/a)
+ * - available: false when no session entries can be read; callers may fall back
+ *   to the current-run snapshot (e.g. for older/CLI contexts).
+ */
+function readSessionAggregate(ctx: any): {
+  available: boolean;
+  aggregate: number | null;
+  read: number;
+  denom: number;
+} {
+  const sm = ctx?.sessionManager;
+  if (sm && typeof sm.getEntries === "function") {
+    try {
+      const entries = sm.getEntries();
+      if (Array.isArray(entries)) {
+        const scan = scanLiveHitRates(entries, 0);
+        const aggregate = (scan.totalDenom > 0 && (scan.totalCacheRead > 0 || scan.totalCacheWrite > 0))
+          ? aggregateHit(scan.totalCacheRead, scan.totalDenom)
+          : null;
+        return { available: true, aggregate, read: scan.totalCacheRead, denom: scan.totalDenom };
+      }
+    } catch {
+      // fall through to unavailable
+    }
+  }
+  return { available: false, aggregate: null, read: 0, denom: 0 };
 }
 
 function showStats(
@@ -1686,6 +1930,7 @@ function showStats(
   const agg = (snap.totalCacheRead === 0 && snap.totalCacheWrite === 0)
     ? null
     : aggregateHit(snap.totalCacheRead, snap.totalHitDenom);
+  const session = readSessionAggregate(ctx);
   const tail = reports.length >= 3
     ? (() => {
         const last3 = reports.slice(-3);
@@ -1703,7 +1948,8 @@ function showStats(
   const lines = [
     `State: ${state.runtimeEnabled ? "enabled" : "disabled"}`,
     `Turns: ${snap.turns}`,
-    `Aggregate hit: ${agg !== null ? agg + "%" : "n/a"}  (read=${snap.totalCacheRead} / denom=${snap.totalHitDenom})`,
+    `Aggregate hit: ${agg !== null ? agg + "%" : "n/a"}  (current run; read=${snap.totalCacheRead} / denom=${snap.totalHitDenom})`,
+    `Session aggregate: ${session.aggregate !== null ? session.aggregate + "%" : "n/a"}  (all session, footer scope; read=${session.read} / denom=${session.denom})`,
     `Cumulative: input=${snap.totalInput}  output=${snap.totalOutput}  cacheRead=${snap.totalCacheRead}  cacheWrite=${snap.totalCacheWrite}`,
     `First-turn prompt: ${firstInfo}`,
     `Skill compact: ${skillCompact ? "on (lossless, recognized templates)" : "off"}`,

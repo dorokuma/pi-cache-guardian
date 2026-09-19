@@ -40,11 +40,22 @@ Pi Agent 的事件系统与扩展 API 已经可用。服务端缓存仍取决于
 
 ### 5. 缓存守护
 
-`PI_CACHE_GUARD=1` 时，session 结束若聚合命中率低于阈值（默认 90%）则告警。禁用后不告警。
+`PI_CACHE_GUARD=1` 时，session 结束若命中率低于阈值（默认 90%）则告警。禁用后不告警。
+
+守护采用**「任一击穿即告警」**（当前运行优先），因此 resume 长会话时历史高分不会稀释本轮劣化：
+- 若**当前运行**（本进程自 `session_start` 以来的区间，即 `state.snapshot` 口径）低于阈值，立即告警——即使全会话聚合仍高于阈值，因为当前运行正是守护要抓的对象。
+- 否则，若**全会话聚合**（完整 `sessionManager.getEntries()` 范围，与 footer `◆` 累计项同一算法）低于阈值，则告警。
+- 从当前运行分支触发时，文案同时给出**两个数字**（如 `current run hit=50% < threshold=90% (session aggregate=95%)`），因此不会与用户看到的 footer 数字矛盾。
+- 当两个口径都没有任何缓存交互（例如 provider 不支持 prompt caching）时，显示 `n/a` 且不告警（不会伪造 0%）。
 
 ### 6. 缓存统计
 
 启用期间记录每轮 `cacheRead` / `cacheWrite` / `input`。`/cache-guardian` 查看合计。Pi 的 `usage.input` 在所有 API 下都是净输入，命中率为 `cacheRead / (input + cacheRead + cacheWrite)`。多轮聚合为 `sum(cacheRead) / sum(分母)`。逐轮明细有界，累计合计不丢。
+
+`/cache-guardian` 同时打印**两个口径**，避免与 footer 数字打架：
+
+- `Aggregate hit ... (current run; ...)` — 本进程自 `session_start` 以来的区间（`state.snapshot` 口径，逐轮报告用它）。
+- `Session aggregate ... (all session, footer scope; ...)` — 完整会话条目，与 footer `◆` 累计项同一算法（resume 后包含历史轮次）。
 
 诊断里的字符串长度是**字符数**，不是 UTF-8 字节；除以 4 只是粗估，不是精确 token。
 
@@ -66,10 +77,13 @@ Pi Agent 的事件系统与扩展 API 已经可用。服务端缓存仍取决于
 
 ### 8. 实时 TUI 页脚（默认开启）
 
-在 TUI 模式下，footer 在长任务执行期间保持实时刷新，不再只在整轮结束（`agent_end`）时更新：
-- **刷新时机**：每轮 LLM 响应结束（`turn_end`）时累加并刷新缓存命中率统计；工具执行起止（`tool_execution_start` / `tool_execution_end`）时刷新上下文窗口占用。
-- **渲染节流**：高频更新路径走 TUI 16ms 渲染节流（`requestRender()` 非 force），避免不必要的强制重绘；低频事件（`agent_end`、`model_select`、`thinking_level_select`、`/cache-guardian reset`）保持 force 强制刷新。
-- **单入口累加**：token usage 仅在 `turn_end` 单入口累加到 run 级 `liveRun` 缓冲区（`agent_end` 时直接结算，不再重复扫描消息），保证不双计。
+在 TUI 模式下，footer 采用与 Pi 官方内置 footer 一致的「渲染时实时计算」方式，不再依赖事件快照：
+- **渲染时实时取数**：命中率在 `render()` 执行时动态遍历 `sessionManager.getEntries()` 实时汇总与提取最新轮次，上下文窗口占用直接调用 `getContextUsage()` 实时获取。
+- **命中率双显示**：命中率采用双菱形图标先累计、后实时的格式：`◆ <累计>% ◇ <实时>%`（例如 `◆ 87% ◇ 95%`）。其中 `◆` 累计项保持常规文本颜色，`◇` 实时最新一轮项使用 warning 警示色；没有任何缓存交互时（cacheRead=0 且 cacheWrite=0，例如不支持 prompt caching 的 provider）显示 `n/a`，**绝不伪造 0%**。`◇` 实时项永远是最新一条 assistant 响应：后续一轮若没有 `usage` 字段或无缓存交互，会显示 `n/a` 而不是残留上一轮数值。
+- **上下文占用分色**：`▲` 上下文段仿官方阈值——`>90%` 用 error 色，`>70%` 用 warning 色，其余保持默认文本色；其它 footer 段颜色不受影响。
+- **刷新时机与节流**：高频事件（`turn_end`、`tool_execution_start`、`tool_execution_end`）触发 16ms TUI 渲染节流刷新，低频事件（`agent_end`、`model_select`、`thinking_level_select`、`/cache-guardian reset`）保持 force 强制重绘。
+- **脏检查缓存**：实时命中率扫描带脏检查缓存，仅在条目数变化时重算；`/cache-guardian reset` 与会话切换会使缓存失效（reset 会记录水位标，footer 只统计 reset 后追加的条目，无新条目则显示 `n/a`；若条目列表比水位标还短，走安全的 `n/a` 回退）。上下文占用每次渲染都实时获取，不做缓存。
+- **单入口累加**：token usage 在 `turn_end` 单入口累加至 `liveRun` 缓冲区并于 `agent_end` 结算，命令端统计与实时 footer 各司其职且不双计。
 
 ## 安装
 
@@ -114,11 +128,11 @@ cp pi-cache-guardian/extensions/cache-guardian.ts ~/.pi/agent/extensions/
 ## 命令
 
 ```
-/cache-guardian          # 显示当前运行区间缓存统计（含一行前缀状态摘要）
+/cache-guardian          # 显示缓存统计（当前运行区间 + 全会话两个口径，含一行前缀状态摘要）
 /cache-guardian prefix   # 查看最近一次前缀变化快照（只含类别/状态/长度）
 /cache-guardian disable  # 禁用本实例（不再写统计、不再装 footer、不改 payload、不更新前缀诊断）
 /cache-guardian enable   # 重新启用（仅在 TUI 且 FOOTER 开启时装 footer）
-/cache-guardian reset    # 重置当前运行区间统计、未分类 400 列表和前缀比较状态，并刷新 footer
+/cache-guardian reset    # 重置当前运行区间统计、未分类 400 列表和前缀比较状态；将 footer 实时视图重置为只统计 reset 之后追加的条目，并刷新 footer
 ```
 
 ## 测试

@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { cacheHitDenom, cacheHitPct, aggregateHit, normalizeUsage } from "../extensions/cache-guardian.ts";
+import { cacheHitDenom, cacheHitPct, aggregateHit, normalizeUsage, computeLiveHitRates } from "../extensions/cache-guardian.ts";
 import { isolateCacheEnv } from "./helpers.mjs";
 
 isolateCacheEnv();
@@ -276,6 +276,345 @@ import { truncateFooter, formatHerdsmanStatus, formatWindowSize } from "../exten
   assert.equal(nullNorm.cacheRead, 0);
   assert.equal(nullNorm.cacheWrite, 0);
   assert.equal(nullNorm.totalTokens, 0);
+}
+
+// 9. computeLiveHitRates tests
+{
+  // 9a. Empty / invalid entries
+  assert.deepEqual(computeLiveHitRates([]), { aggregate: null, latest: null });
+  assert.deepEqual(computeLiveHitRates(null), { aggregate: null, latest: null });
+  assert.deepEqual(computeLiveHitRates(undefined), { aggregate: null, latest: null });
+  assert.deepEqual(computeLiveHitRates([null, undefined, {}, { type: "other" }]), { aggregate: null, latest: null });
+
+  // 9b. Single assistant message: aggregate and latest must match
+  const singleEntry = [
+    {
+      type: "message",
+      message: {
+        role: "assistant",
+        usage: { input: 200, cacheRead: 800, cacheWrite: 0 },
+      },
+    },
+  ];
+  // 800 / 1000 = 80%
+  assert.deepEqual(computeLiveHitRates(singleEntry), { aggregate: 80, latest: 80 });
+
+  // 9c. Multi-turn assistant messages: aggregate is cumulative, latest is newest assistant
+  const multiTurnEntries = [
+    {
+      type: "message",
+      message: {
+        role: "assistant",
+        usage: { input: 200, cacheRead: 800, cacheWrite: 0 }, // 80%
+      },
+    },
+    {
+      type: "message",
+      message: {
+        role: "assistant",
+        usage: { input: 50, cacheRead: 950, cacheWrite: 0 }, // 95%
+      },
+    },
+  ];
+  // Aggregate: (800 + 950) / (1000 + 1000) = 1750 / 2000 = 87.5% -> 88%
+  // Latest: 950 / 1000 = 95%
+  assert.deepEqual(computeLiveHitRates(multiTurnEntries), { aggregate: 88, latest: 95 });
+
+  // 9d. toolResult messages contribute to aggregate only, NOT latest
+  const withToolResult = [
+    {
+      type: "message",
+      message: {
+        role: "assistant",
+        usage: { input: 200, cacheRead: 800, cacheWrite: 0 }, // 80%
+      },
+    },
+    {
+      type: "message",
+      message: {
+        role: "toolResult",
+        usage: { input: 100, cacheRead: 100, cacheWrite: 0 }, // 50%
+      },
+    },
+  ];
+  // Aggregate: (800 + 100) / (1000 + 200) = 900 / 1200 = 75%
+  // Latest: 800 / 1000 = 80% (toolResult does NOT overwrite latest)
+  assert.deepEqual(computeLiveHitRates(withToolResult), { aggregate: 75, latest: 80 });
+
+  // 9e. branch_summary & compaction contribute to aggregate only, NOT latest
+  const withCompactionAndBranch = [
+    {
+      type: "message",
+      message: {
+        role: "assistant",
+        usage: { input: 100, cacheRead: 900, cacheWrite: 0 }, // 90%
+      },
+    },
+    {
+      type: "compaction",
+      usage: { input: 50, cacheRead: 50, cacheWrite: 0 }, // 50%
+    },
+    {
+      type: "branch_summary",
+      usage: { input: 50, cacheRead: 50, cacheWrite: 0 }, // 50%
+    },
+  ];
+  // Aggregate: (900 + 50 + 50) / (1000 + 100 + 100) = 1000 / 1200 = 83.3% -> 83%
+  // Latest: 90% (unchanged by compaction/branch_summary)
+  assert.deepEqual(computeLiveHitRates(withCompactionAndBranch), { aggregate: 83, latest: 90 });
+
+  // 9f. Compaction/toolResult only (no assistant message): aggregate calculated, latest is null
+  const compactionOnly = [
+    {
+      type: "compaction",
+      usage: { input: 100, cacheRead: 300, cacheWrite: 0 },
+    },
+  ];
+  assert.deepEqual(computeLiveHitRates(compactionOnly), { aggregate: 75, latest: null });
+
+  // 9g. Mixed sequence: assistant1 -> toolResult -> compaction -> assistant2 -> toolResult
+  const mixedSequence = [
+    {
+      type: "message",
+      message: {
+        role: "user",
+        content: "hello",
+      },
+    },
+    {
+      type: "message",
+      message: {
+        role: "assistant",
+        usage: { input: 300, cacheRead: 700, cacheWrite: 0 }, // 70% (denom 1000)
+      },
+    },
+    {
+      type: "message",
+      message: {
+        role: "toolResult",
+        usage: { input: 100, cacheRead: 0, cacheWrite: 0 }, // 0% (denom 100)
+      },
+    },
+    {
+      type: "compaction",
+      usage: { input: 50, cacheRead: 50, cacheWrite: 0 }, // 50% (denom 100)
+    },
+    {
+      type: "message",
+      message: {
+        role: "assistant",
+        usage: { input: 100, cacheRead: 900, cacheWrite: 0 }, // 90% (denom 1000)
+      },
+    },
+    {
+      type: "message",
+      message: {
+        role: "toolResult",
+        usage: { input: 50, cacheRead: 50, cacheWrite: 0 }, // 50% (denom 100)
+      },
+    },
+  ];
+  // Aggregate: (700 + 0 + 50 + 900 + 50) / (1000 + 100 + 100 + 1000 + 100) = 1700 / 2300 = 73.9% -> 74%
+  // Latest: assistant 2 = 900 / 1000 = 90%
+  assert.deepEqual(computeLiveHitRates(mixedSequence), { aggregate: 74, latest: 90 });
+
+  // 9h. Messages with denom=0 or no usage
+  const zeroUsageEntries = [
+    {
+      type: "message",
+      message: {
+        role: "assistant",
+        usage: { input: 0, cacheRead: 0, cacheWrite: 0 },
+      },
+    },
+    {
+      type: "message",
+      message: {
+        role: "user",
+        content: "test",
+      },
+    },
+  ];
+  assert.deepEqual(computeLiveHitRates(zeroUsageEntries), { aggregate: null, latest: null });
+
+  // 9i. Cache-unsupported model (cacheRead=0, cacheWrite=0, input>0): n/a, never 0%
+  const noCacheEntries = [
+    {
+      type: "message",
+      message: {
+        role: "assistant",
+        usage: { input: 1000, cacheRead: 0, cacheWrite: 0 },
+      },
+    },
+  ];
+  assert.deepEqual(computeLiveHitRates(noCacheEntries), { aggregate: null, latest: null });
+
+  // 9j. Latest residue: newest assistant round without cache interaction clears latest to null
+  const residueEntries = [
+    {
+      type: "message",
+      message: {
+        role: "assistant",
+        usage: { input: 100, cacheRead: 900, cacheWrite: 0 }, // 90%
+      },
+    },
+    {
+      type: "message",
+      message: {
+        role: "assistant",
+        usage: { input: 1000, cacheRead: 0, cacheWrite: 0 }, // no cache round
+      },
+    },
+  ];
+  // Aggregate still counts both: (900 + 0) / (1000 + 1000) = 45%
+  assert.deepEqual(computeLiveHitRates(residueEntries), { aggregate: 45, latest: null });
+
+  // 9k. Latest residue: newest assistant round with denom=0 clears latest to null
+  const zeroDenomLatest = [
+    {
+      type: "message",
+      message: {
+        role: "assistant",
+        usage: { input: 100, cacheRead: 900, cacheWrite: 0 }, // 90%
+      },
+    },
+    {
+      type: "message",
+      message: {
+        role: "assistant",
+        usage: { input: 0, cacheRead: 0, cacheWrite: 0 }, // denom 0
+      },
+    },
+  ];
+  // Zero-denom entry adds nothing to the denominator: aggregate stays 900/1000 = 90%
+  assert.deepEqual(computeLiveHitRates(zeroDenomLatest), { aggregate: 90, latest: null });
+
+  // 9l. cacheWrite-only round still counts (cache interaction happened), latest = 0%
+  const writeOnly = [
+    {
+      type: "message",
+      message: {
+        role: "assistant",
+        usage: { input: 100, cacheRead: 0, cacheWrite: 50 },
+      },
+    },
+  ];
+  assert.deepEqual(computeLiveHitRates(writeOnly), { aggregate: 0, latest: 0 });
+
+  // 9m. cacheWrite must be accumulated from toolResult / compaction branches too
+  const mixedWrite = [
+    {
+      type: "message",
+      message: {
+        role: "assistant",
+        usage: { input: 100, cacheRead: 0, cacheWrite: 50 },
+      },
+    },
+    {
+      type: "message",
+      message: {
+        role: "toolResult",
+        usage: { input: 100, cacheRead: 100, cacheWrite: 20 },
+      },
+    },
+    {
+      type: "compaction",
+      usage: { input: 100, cacheRead: 100, cacheWrite: 30 },
+    },
+  ];
+  // read=200, write=100, denom=(150+220+230)=600 -> 200/600 = 33.3% -> 33%
+  assert.deepEqual(computeLiveHitRates(mixedWrite), { aggregate: 33, latest: 0 });
+
+  // 9n. resetBaseline restricts the scan to entries appended after reset
+  const baselineEntries = [
+    {
+      type: "message",
+      message: {
+        role: "assistant",
+        usage: { input: 200, cacheRead: 800, cacheWrite: 0 }, // 80%
+      },
+    },
+    {
+      type: "message",
+      message: {
+        role: "assistant",
+        usage: { input: 50, cacheRead: 950, cacheWrite: 0 }, // 95%
+      },
+    },
+    {
+      type: "message",
+      message: {
+        role: "assistant",
+        usage: { input: 1000, cacheRead: 0, cacheWrite: 0 }, // no cache
+      },
+    },
+  ];
+  // Baseline 0 -> full scope: (800+950+0)/(1000+1000+1000) = 58%, latest null
+  assert.deepEqual(computeLiveHitRates(baselineEntries, 0), { aggregate: 58, latest: null });
+  // Baseline 1 -> last two only: (950+0)/(1000+1000) = 48%, latest null
+  assert.deepEqual(computeLiveHitRates(baselineEntries, 1), { aggregate: 48, latest: null });
+  // Baseline 2 -> only the no-cache entry: n/a
+  assert.deepEqual(computeLiveHitRates(baselineEntries, 2), { aggregate: null, latest: null });
+  // Baseline equal to length -> nothing after reset: n/a
+  assert.deepEqual(computeLiveHitRates(baselineEntries, 3), { aggregate: null, latest: null });
+  // Baseline beyond length -> trimmed/replaced session: safe fallback to n/a, never wrong window
+  assert.deepEqual(computeLiveHitRates(baselineEntries, 4), { aggregate: null, latest: null });
+
+  // 9o. Sequence: assistant(has usage, 80%) -> toolResult -> assistant(NO usage)
+  // The final assistant carries no usage (interrupt / error / injected message):
+  // latest must clear to null (no stale 80%), and the aggregate must still be
+  // computed from the entries that DO carry usage (not 0, not null).
+  const noUsageTrail = [
+    {
+      type: "message",
+      message: {
+        role: "assistant",
+        usage: { input: 200, cacheRead: 800, cacheWrite: 0 }, // 80% (denom 1000)
+      },
+    },
+    {
+      type: "message",
+      message: {
+        role: "toolResult",
+        usage: { input: 100, cacheRead: 0, cacheWrite: 0 }, // contributes denom only (denom 100)
+      },
+    },
+    {
+      type: "message",
+      message: {
+        role: "assistant",
+        // no usage field
+      },
+    },
+  ];
+  // Aggregate: (800 + 0) / (1000 + 100) = 800 / 1100 = 72.7% -> 73%
+  assert.deepEqual(computeLiveHitRates(noUsageTrail), { aggregate: 73, latest: null });
+
+  // 9p. Sequence: assistant(has usage, 80%) -> assistant(no usage) -> toolResult(has usage)
+  // The no-usage assistant in the middle clears latest to null; the trailing
+  // toolResult contributes to aggregate only, latest stays null.
+  const noUsageMiddle = [
+    {
+      type: "message",
+      message: {
+        role: "assistant",
+        usage: { input: 200, cacheRead: 800, cacheWrite: 0 }, // 80% (denom 1000)
+      },
+    },
+    {
+      type: "message",
+      message: { role: "assistant" }, // no usage -> latest null
+    },
+    {
+      type: "message",
+      message: {
+        role: "toolResult",
+        usage: { input: 100, cacheRead: 100, cacheWrite: 0 }, // contributes to aggregate
+      },
+    },
+  ];
+  // Aggregate: (800 + 100) / (1000 + 200) = 900 / 1200 = 75%; latest remains null
+  assert.deepEqual(computeLiveHitRates(noUsageMiddle), { aggregate: 75, latest: null });
 }
 
 console.log("All hit-rate and footer tests passed!");
