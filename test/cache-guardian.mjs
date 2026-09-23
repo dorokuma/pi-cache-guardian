@@ -1033,7 +1033,7 @@ function compactableSkillSet() {
   ok("Live footer computes dual hit rates from sessionManager with warning color on latest");
 }
 
-// ── Footer fixes: n/a for no-cache models, latest residue cleared, reset watermark, dirty-check cache ──
+// ── Footer fixes: ◆/◇ both n/a until the window shows a cache interaction, then ◇ shows 0% on a later miss, reset watermark, dirty-check cache ──
 {
   const sessionEntries = [];
   let getEntriesCalls = 0;
@@ -1095,16 +1095,15 @@ function compactableSkillSet() {
   assert.equal(getEntriesCalls, 3, "no recompute when entry count is unchanged");
   sessionEntries[0].message.usage.cacheRead = 500; // revert for clean math below
 
-  // 4. No-cache round B -> ◇ n/a (no residue from A), ◆ 25%; never 0%
+  // 4. No-cache round B -> ◇ 0% (round measured, no cache interaction), ◆ 25%
   sessionEntries.push({
     type: "message",
     message: { role: "assistant", usage: { input: 1000, cacheRead: 0, cacheWrite: 0 } },
   });
   const noCacheLine = footerComponent.render(120)[0];
-  assert.match(noCacheLine, /\[TXT:25%\]/);
-  assert.match(noCacheLine, /\[DIM:n\/a\]/);
-  assert.ok(!noCacheLine.includes("[TXT:0%]"), "no-cache model must not show 0%");
-  assert.ok(!noCacheLine.includes("[WARN:0%]"), "no-cache model must not show 0% latest");
+  assert.match(noCacheLine, /\[TXT:25%\]/, "aggregate keeps its own stricter rule");
+  assert.match(noCacheLine, /\[WARN:0%\]/, "a measured round without cache interaction must show 0%, not n/a");
+  assert.ok(!noCacheLine.includes("[DIM:◇] [DIM:n/a]"), "no-cache round must not hide ◇ behind n/a");
   assert.equal(getEntriesCalls, 4);
 
   // 5. Cache round C -> ◆ 47% ◇ 90%
@@ -1115,6 +1114,8 @@ function compactableSkillSet() {
   const cachedLine = footerComponent.render(120)[0];
   assert.match(cachedLine, /\[TXT:47%\]/);
   assert.match(cachedLine, /\[WARN:90%\]/);
+  // Warning color belongs to ◇ only: ◆ stays default text even on a 0% aggregate.
+  assert.equal((cachedLine.match(/\[WARN:/g) || []).length, 1, "warning color is reserved for the ◇ slot");
   assert.equal(getEntriesCalls, 5);
 
   // 6. /cache-guardian reset -> watermark set to 3 entries -> footer n/a
@@ -1135,7 +1136,119 @@ function compactableSkillSet() {
   assert.match(afterResetLine, /\[WARN:50%\]/);
   assert.equal(getEntriesCalls, 8);
 
-  ok("Footer shows n/a for no-cache rounds, clears latest residue, applies reset watermark, caches unchanged renders");
+  // 8. Second reset -> watermark at 4 entries; the post-reset window never shows a
+  //    cache interaction, so ◆ and ◇ are both n/a. The round is measurable (input
+  //    1000), but the narrowed gate keeps a cache-free window at n/a — no warning 0%.
+  await ext.commands.get("cache-guardian").handler("reset", ctx);
+  assert.equal(getEntriesCalls, 9);
+  sessionEntries.push({
+    type: "message",
+    message: { role: "assistant", usage: { input: 1000, cacheRead: 0, cacheWrite: 0 } },
+  });
+  const noInteractionLine = footerComponent.render(120)[0];
+  assert.match(noInteractionLine, /\[DIM:◆\] \[DIM:n\/a\] \[DIM:◇\] \[DIM:n\/a\]/, "no cache interaction in window -> ◆ n/a ◇ n/a");
+  assert.ok(!noInteractionLine.includes("[WARN:0%]"), "a cache-free window must not render a warning 0%");
+  assert.equal(getEntriesCalls, 10);
+
+  // 9. Cache lands again inside the gated window -> ◆ 8% ◇ 50% (one cache read
+  //    against the pure no-cache denominator), i.e. the gate reopens.
+  sessionEntries.push({
+    type: "message",
+    message: { role: "assistant", usage: { input: 100, cacheRead: 100, cacheWrite: 0 } },
+  });
+  const reopenedLine = footerComponent.render(120)[0];
+  assert.match(reopenedLine, /\[TXT:8%\]/); // 100 / (1000 + 200) = 8.3% -> 8%
+  assert.match(reopenedLine, /\[WARN:50%\]/);
+  assert.equal(getEntriesCalls, 11);
+
+  ok("Footer gates ◆/◇ on a cache interaction (n/a while absent, 0% after a miss), applies reset watermark, caches unchanged renders");
+}
+
+// ── Footer ◆/◇ vs /cache-guardian output: the command's Session aggregate is the
+//    same all-session scan the footer's ◆ renders; both stay n/a while the
+//    session never showed a cache interaction, and ◇ shows 0% after a miss ──
+{
+  delete process.env.PI_CACHE_GUARD; // keep the command output free of guard lines
+  const sessionEntries = [];
+  const notices = [];
+  let footerComponent = null;
+  const trackingTheme = {
+    fg: (style, text) => {
+      if (style === "warning") return `[WARN:${text}]`;
+      if (style === "error") return `[ERR:${text}]`;
+      if (style === "text") return `[TXT:${text}]`;
+      if (style === "dim") return `[DIM:${text}]`;
+      return text;
+    },
+  };
+  const ctx = mockContext({
+    mode: "tui",
+    model: { name: "reconcile-model" },
+    sessionManager: {
+      getSessionId: () => "test-session",
+      appendCustomEntry: () => {},
+      getEntries: () => sessionEntries,
+    },
+    getContextUsage: () => ({ tokens: 2000, contextWindow: 10000, percent: 20 }),
+    ui: {
+      notify: (...x) => notices.push(x),
+      setFooter(factory) {
+        if (typeof factory === "function") {
+          footerComponent = factory(
+            { requestRender: () => {} },
+            trackingTheme,
+            { getExtensionStatuses: () => new Map() },
+          );
+        }
+      },
+    },
+  });
+
+  const { ext } = await fresh(ctx);
+  assert.ok(footerComponent, "footer should be installed");
+
+  const commandStats = async () => {
+    notices.length = 0;
+    await ext.commands.get("cache-guardian").handler("", ctx);
+    return notices.map((n) => n[0]).join("\n");
+  };
+
+  // 1. Pure no-cache session -> ◆ n/a ◇ n/a in the footer, and the command agrees.
+  sessionEntries.push({
+    type: "message",
+    message: { role: "assistant", usage: { input: 1000, cacheRead: 0, cacheWrite: 0 } },
+  });
+  const noCacheLine = footerComponent.render(120)[0];
+  assert.match(noCacheLine, /\[DIM:◆\] \[DIM:n\/a\] \[DIM:◇\] \[DIM:n\/a\]/);
+  assert.ok(!noCacheLine.includes("[WARN:0%]"), "cache-free session must not render warning 0%");
+  let stats = await commandStats();
+  assert.match(stats, /Session aggregate: n\/a  \(all session, footer scope; read=0 \/ denom=1000\)/);
+
+  // 2. A cache round lands -> ◆ 25% ◇ 50% in the footer; the command's Session
+  //    aggregate is the very same 25% (same scan, same scope).
+  sessionEntries.push({
+    type: "message",
+    message: { role: "assistant", usage: { input: 500, cacheRead: 500, cacheWrite: 0 } },
+  });
+  const cacheLine = footerComponent.render(120)[0];
+  assert.match(cacheLine, /\[TXT:25%\]/); // 500 / (1000 + 1000) = 25%
+  assert.match(cacheLine, /\[WARN:50%\]/);
+  stats = await commandStats();
+  assert.match(stats, /Session aggregate: 25%  \(all session, footer scope; read=500 \/ denom=2000\)/);
+
+  // 3. A single miss after the interaction -> ◆ 17% (aggregate moves), ◇ 0% with
+  //    the warning color; the command's Session aggregate still matches ◆.
+  sessionEntries.push({
+    type: "message",
+    message: { role: "assistant", usage: { input: 1000, cacheRead: 0, cacheWrite: 0 } },
+  });
+  const missLine = footerComponent.render(120)[0];
+  assert.match(missLine, /\[TXT:17%\]/); // 500 / (1000 + 1000 + 1000) = 16.7% -> 17%
+  assert.match(missLine, /\[WARN:0%\]/);
+  stats = await commandStats();
+  assert.match(stats, /Session aggregate: 17%  \(all session, footer scope; read=500 \/ denom=3000\)/);
+
+  ok("Footer ◆ matches the command's Session aggregate; ◇ is 0% after a miss but n/a without any cache interaction");
 }
 
 // ── Context occupancy danger colors (footer segment only) ──
@@ -1890,6 +2003,69 @@ function compactableSkillSet() {
     assert.match(footerComponent.render(200)[0], /▸ n\/a/, "session_start must clear the TPS estimate");
 
     ok("Footer TPS slot estimates t/s, uses the last request t0, and resets to n/a");
+  } finally {
+    Date.now = realNow;
+  }
+}
+
+// ── TPS t0 is consumed exactly once per turn: a repeated turn_end never re-measures the same stamp ──
+{
+  let footerComponent = null;
+  const ctx = mockContext({
+    mode: "tui",
+    model: { name: "tps-consume-model" },
+    getContextUsage: () => ({ tokens: 1000, contextWindow: 10000, percent: 10 }),
+    ui: {
+      notify() {},
+      setFooter(factory) {
+        if (typeof factory === "function") {
+          footerComponent = factory(
+            { requestRender: () => {} },
+            { fg: (_s, t) => t },
+            { getExtensionStatuses: () => new Map() },
+          );
+        }
+      },
+    },
+  });
+
+  const realNow = Date.now;
+  let fakeNow = 10_000_000;
+  Date.now = () => fakeNow;
+  try {
+    const { ext } = await fresh(ctx);
+    assert.ok(footerComponent, "footer should be installed");
+
+    // Turn 1: t0 stamped by before_provider_request, consumed by turn_end.
+    fakeNow = 10_000_000;
+    await fire(ext, "before_provider_request", ctx, { payload: {} });
+    fakeNow = 10_001_000; // +1000ms
+    await fire(ext, "turn_end", ctx, {
+      message: { role: "assistant", usage: { input: 10, output: 90 } },
+    });
+    assert.match(footerComponent.render(200)[0], /▸ 90 t\/s/, "first turn estimates from its own t0");
+
+    // Turn 2: NO new before_provider_request, wall clock jumps far ahead (stalled /
+    // replayed turn_end). The consumed t0 must not be measured again, otherwise
+    // elapsed grows without bound and t/s collapses toward 0.
+    fakeNow = 10_060_000; // +60s since turn 1, still no new request
+    await fire(ext, "turn_end", ctx, {
+      message: { role: "assistant", usage: { input: 10, output: 90 } },
+    });
+    const repeatedLine = footerComponent.render(200)[0];
+    assert.match(repeatedLine, /▸ n\/a/, "a repeated turn_end without a new request must show n/a");
+    assert.ok(!/▸ \d/.test(repeatedLine), `no bogus t/s from a stale t0: ${repeatedLine}`);
+
+    // Turn 3: a fresh before_provider_request re-records t0 and yields a new estimate.
+    fakeNow = 11_000_000;
+    await fire(ext, "before_provider_request", ctx, { payload: {} });
+    fakeNow = 11_000_500; // +500ms
+    await fire(ext, "turn_end", ctx, {
+      message: { role: "assistant", usage: { input: 10, output: 100 } },
+    });
+    assert.match(footerComponent.render(200)[0], /▸ 200 t\/s/, "a new request re-records t0 and estimates again");
+
+    ok("TPS t0 is consumed exactly once per turn; no stale-t0 re-consumption");
   } finally {
     Date.now = realNow;
   }

@@ -437,7 +437,11 @@ import { truncateFooter, formatHerdsmanStatus, formatWindowSize } from "../exten
   ];
   assert.deepEqual(computeLiveHitRates(zeroUsageEntries), { aggregate: null, latest: null });
 
-  // 9i. Cache-unsupported model (cacheRead=0, cacheWrite=0, input>0): n/a, never 0%
+  // 9i. No-cache interaction anywhere in the window (cacheRead=0, cacheWrite=0 for
+  //     every entry): the round WAS measured (denom > 0) so it would report 0%,
+  //     but the narrowed ◆/◇ gate requires the window to have shown a cache
+  //     interaction at least once. A model that never reports cache must stay n/a
+  //     on both diamonds — never a fabricated 0%.
   const noCacheEntries = [
     {
       type: "message",
@@ -449,7 +453,8 @@ import { truncateFooter, formatHerdsmanStatus, formatWindowSize } from "../exten
   ];
   assert.deepEqual(computeLiveHitRates(noCacheEntries), { aggregate: null, latest: null });
 
-  // 9j. Latest residue: newest assistant round without cache interaction clears latest to null
+  // 9j. Latest residue: newest assistant round without cache interaction reports 0%
+  //     (it was measured; there is no cache interaction), never a stale 45%.
   const residueEntries = [
     {
       type: "message",
@@ -462,12 +467,12 @@ import { truncateFooter, formatHerdsmanStatus, formatWindowSize } from "../exten
       type: "message",
       message: {
         role: "assistant",
-        usage: { input: 1000, cacheRead: 0, cacheWrite: 0 }, // no cache round
+        usage: { input: 1000, cacheRead: 0, cacheWrite: 0 }, // no cache round -> 0%
       },
     },
   ];
   // Aggregate still counts both: (900 + 0) / (1000 + 1000) = 45%
-  assert.deepEqual(computeLiveHitRates(residueEntries), { aggregate: 45, latest: null });
+  assert.deepEqual(computeLiveHitRates(residueEntries), { aggregate: 45, latest: 0 });
 
   // 9k. Latest residue: newest assistant round with denom=0 clears latest to null
   const zeroDenomLatest = [
@@ -549,11 +554,13 @@ import { truncateFooter, formatHerdsmanStatus, formatWindowSize } from "../exten
       },
     },
   ];
-  // Baseline 0 -> full scope: (800+950+0)/(1000+1000+1000) = 58%, latest null
-  assert.deepEqual(computeLiveHitRates(baselineEntries, 0), { aggregate: 58, latest: null });
-  // Baseline 1 -> last two only: (950+0)/(1000+1000) = 48%, latest null
-  assert.deepEqual(computeLiveHitRates(baselineEntries, 1), { aggregate: 48, latest: null });
-  // Baseline 2 -> only the no-cache entry: n/a
+  // Baseline 0 -> full scope: (800+950+0)/(1000+1000+1000) = 58%, latest 0% (last
+  // round was measured, just without cache interaction)
+  assert.deepEqual(computeLiveHitRates(baselineEntries, 0), { aggregate: 58, latest: 0 });
+  // Baseline 1 -> last two only: (950+0)/(1000+1000) = 48%, latest 0%
+  assert.deepEqual(computeLiveHitRates(baselineEntries, 1), { aggregate: 48, latest: 0 });
+  // Baseline 2 -> only the no-cache entry: the reset window never showed a cache
+  // interaction, so both diamonds are n/a (the measured round's 0% is gated away)
   assert.deepEqual(computeLiveHitRates(baselineEntries, 2), { aggregate: null, latest: null });
   // Baseline equal to length -> nothing after reset: n/a
   assert.deepEqual(computeLiveHitRates(baselineEntries, 3), { aggregate: null, latest: null });
@@ -615,6 +622,112 @@ import { truncateFooter, formatHerdsmanStatus, formatWindowSize } from "../exten
   ];
   // Aggregate: (800 + 100) / (1000 + 200) = 900 / 1200 = 75%; latest remains null
   assert.deepEqual(computeLiveHitRates(noUsageMiddle), { aggregate: 75, latest: null });
+
+  // 9q. ◇ 0% vs n/a, side by side: a measured round always yields a number even
+  //     without cache interaction; only missing usage (data gap) or denom === 0
+  //     (nothing measurable) is unknown. The aggregate keeps its stricter rule.
+  const zeroVsNaLatest = [
+    {
+      type: "message",
+      message: { role: "assistant", usage: { input: 100, cacheRead: 900, cacheWrite: 0 } }, // 90%
+    },
+    {
+      type: "message",
+      message: { role: "assistant", usage: { input: 1000, cacheRead: 0, cacheWrite: 0 } }, // measured, no cache -> 0%
+    },
+    {
+      type: "message",
+      message: { role: "assistant" }, // no usage at all -> unknown (n/a)
+    },
+  ];
+  // Aggregate: 900 / 2000 = 45%; latest is the trailing no-usage round -> null (n/a)
+  assert.deepEqual(computeLiveHitRates(zeroVsNaLatest), { aggregate: 45, latest: null });
+
+  // 9r. Pure no-cache window (every entry cacheRead=0 && cacheWrite=0, including a
+  //     denom-0 round and a toolResult): nothing measurable interacted with cache,
+  //     so ◆ and ◇ are both n/a even though the last round had a denominator.
+  const measuredNoCacheLast = [
+    {
+      type: "message",
+      message: { role: "toolResult", usage: { input: 0, cacheRead: 0, cacheWrite: 0 } },
+    },
+    {
+      type: "message",
+      message: { role: "assistant", usage: { input: 0, cacheRead: 0, cacheWrite: 0 } }, // denom 0
+    },
+    {
+      type: "message",
+      message: { role: "assistant", usage: { input: 300, cacheRead: 0, cacheWrite: 0 } }, // measured, but no interaction ever
+    },
+  ];
+  assert.deepEqual(computeLiveHitRates(measuredNoCacheLast), { aggregate: null, latest: null });
+
+  // 9s. Pure no-cache session across all entry kinds (assistant + toolResult +
+  //     compaction): no cache interaction in the window -> ◆ n/a ◇ n/a.
+  const pureNoCache = [
+    {
+      type: "message",
+      message: { role: "assistant", usage: { input: 1000, cacheRead: 0, cacheWrite: 0 } },
+    },
+    {
+      type: "message",
+      message: { role: "toolResult", usage: { input: 50, cacheRead: 0, cacheWrite: 0 } },
+    },
+    { type: "compaction", usage: { input: 10, cacheRead: 0, cacheWrite: 0 } },
+  ];
+  assert.deepEqual(computeLiveHitRates(pureNoCache), { aggregate: null, latest: null });
+
+  // 9t. Cache interaction seen only via toolResult cacheWrite, then an assistant
+  //     round without interaction: the gate is open, so ◆ 0% (read 0 / 1050) and
+  //     ◇ 0% — a measured round that used no cache.
+  const interactionThenMiss = [
+    {
+      type: "message",
+      message: { role: "toolResult", usage: { input: 100, cacheRead: 0, cacheWrite: 50 } },
+    },
+    {
+      type: "message",
+      message: { role: "assistant", usage: { input: 900, cacheRead: 0, cacheWrite: 0 } },
+    },
+  ];
+  assert.deepEqual(computeLiveHitRates(interactionThenMiss), { aggregate: 0, latest: 0 });
+
+  // 9u. Cache interaction seen only via branch_summary cacheWrite (a summary never
+  //     becomes a round): ◆ 0% (read 0 / 330) and the measured assistant round is
+  //     ◇ 0% — the gate counts every scanned entry kind.
+  const summaryInteractionThenMiss = [
+    { type: "branch_summary", usage: { input: 100, cacheRead: 0, cacheWrite: 30 } },
+    {
+      type: "message",
+      message: { role: "assistant", usage: { input: 200, cacheRead: 0, cacheWrite: 0 } },
+    },
+  ];
+  assert.deepEqual(computeLiveHitRates(summaryInteractionThenMiss), { aggregate: 0, latest: 0 });
+
+  // 9v. Cache interaction only via compaction cacheRead, then an assistant round
+  //     with no usage: the gate is open (◆ 83% = 500/600) but the newest round
+  //     carries no usage, so ◇ stays n/a rather than leaking a stale value.
+  const compactionInteractionNoUsage = [
+    { type: "compaction", usage: { input: 100, cacheRead: 500, cacheWrite: 0 } },
+    { type: "message", message: { role: "assistant" } }, // no usage -> latest unknown
+  ];
+  assert.deepEqual(computeLiveHitRates(compactionInteractionNoUsage), { aggregate: 83, latest: null });
+
+  // 9w. After-seen-then-miss: a cache round followed by a single cache-free round
+  //     keeps ◆ numeric and shows ◇ 0% (the just-measured round). Restricting the
+  //     window with a baseline that drops the cache round returns ◆ and ◇ to n/a.
+  const seenThenMiss = [
+    {
+      type: "message",
+      message: { role: "assistant", usage: { input: 100, cacheRead: 900, cacheWrite: 0 } },
+    },
+    {
+      type: "message",
+      message: { role: "assistant", usage: { input: 1000, cacheRead: 0, cacheWrite: 0 } },
+    },
+  ];
+  assert.deepEqual(computeLiveHitRates(seenThenMiss), { aggregate: 45, latest: 0 });
+  assert.deepEqual(computeLiveHitRates(seenThenMiss, 1), { aggregate: null, latest: null });
 }
 
 // 10. formatTps: estimate output tokens/s from tokens + elapsed ms; null (n/a) when uncomputable.

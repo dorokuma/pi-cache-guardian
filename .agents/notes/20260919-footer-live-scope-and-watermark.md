@@ -1,6 +1,6 @@
 ---
-status: active
-superseded_by: ""
+status: active # active | superseded — 仅「latest 无条件覆盖」一条款被 20260922-footer-latest-zero-and-tps-t0-once.md 收窄版取代（◆/◇ 共享缓存交互门控），其余条款仍有效
+superseded_by: 20260922-footer-latest-zero-and-tps-t0-once.md
 supersedes: ""
 模块: extensions
 ---

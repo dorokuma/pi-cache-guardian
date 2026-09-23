@@ -141,9 +141,17 @@ type LiveHitScan = {
 /**
  * Scan session entries from `start` (inclusive) and accumulate cache counters.
  * - assistant messages set `latest` unconditionally: role and usage are decoupled.
- *   A newer assistant round with usage sets/clears `latest` from its own numbers;
- *   a newer assistant round *without* usage (interrupt / error / injected message)
- *   clears `latest` to null and does not accumulate, so no stale value survives.
+ *   A newer assistant round with usage owns `latest` from its own numbers: with a
+ *   measurable denominator (denom > 0) it reports
+ *   `aggregateHit(cacheRead, denom)`, so a round the model ran without any cache
+ *   interaction would render 0% ("no cache in play") instead of hiding the round
+ *   behind n/a. Only a round whose usage payload is missing (interrupt / error /
+ *   injected message) or whose denominator is 0 (nothing measurable) is unknown
+ *   and sets `latest` back to null, so no stale value survives.
+ *   Publishing gate: the caller (computeLiveHitRates) only exposes this value
+ *   when the scanned window ever showed a cache interaction (judged from the
+ *   accumulated totals), so a model that never reports cache keeps ◇ null
+ *   instead of a fabricated 0%.
  * - toolResult / branch_summary / compaction usage counts towards aggregate only
  */
 function scanLiveHitRates(entries: any[], start: number): LiveHitScan {
@@ -164,12 +172,17 @@ function scanLiveHitRates(entries: any[], start: number): LiveHitScan {
           totalCacheRead += norm.cacheRead;
           totalCacheWrite += norm.cacheWrite;
           totalDenom += denom;
-          latest = (denom > 0 && (norm.cacheRead > 0 || norm.cacheWrite > 0))
-            ? aggregateHit(norm.cacheRead, denom)
-            : null;
+          // ◇ 0% semantics: denom > 0 is enough to judge the round, so a round
+          // with no cache interaction (cacheRead === 0 && cacheWrite === 0)
+          // reports 0% rather than n/a. Only a missing usage payload or a zero
+          // denominator leaves the round unmeasurable (latest -> null, n/a).
+          // computeLiveHitRates decides whether that 0% is ever published: it is
+          // dropped when the window never showed a cache interaction.
+          latest = denom > 0 ? aggregateHit(norm.cacheRead, denom) : null;
         } else {
-          // Assistant without usage: do not accumulate, but reset latest so the
-          // footer never shows a stale value from an earlier round.
+          // Assistant without usage: data missing -> latest is unknown (n/a), and
+          // no accumulation, so the footer never shows a stale value from an
+          // earlier round.
           latest = null;
         }
       } else if (entry.message.role === "toolResult" && entry.message.usage) {
@@ -197,15 +210,27 @@ function scanLiveHitRates(entries: any[], start: number): LiveHitScan {
  *   Returns null (n/a) unless at least one entry had cache interaction
  *   (cacheRead > 0 || cacheWrite > 0); cache-unsupported models show n/a, not 0%.
  * - latest: cacheRead / denom for the latest role === "assistant" message with usage.
- *   Each new assistant round overwrites `latest` unconditionally: a round with
- *   denom 0, no cache interaction (cacheRead === 0 && cacheWrite === 0), or no
- *   usage field at all yields null, so no stale value survives from an earlier round.
+ *   Each new assistant round overwrites `latest` unconditionally: a round with a
+ *   measurable denominator (denom > 0) reports aggregateHit(cacheRead, denom), so
+ *   a round that follows a cache interaction but itself had none reports 0%
+ *   ("no cache in play this round"); a round with no usage field at all (data
+ *   missing) or denom === 0 (no measurable tokens) yields null, so no stale value
+ *   survives from an earlier round.
+ *   Narrowed gate: ◇ publishes a number only when the scanned window ever showed a
+ *   cache interaction (cacheRead > 0 || cacheWrite > 0 across every scanned
+ *   entry — assistant, toolResult, compaction, branch_summary). A window that
+ *   never did (a model that simply does not report cache) renders n/a for ◇ as
+ *   well, exactly like ◆, so cache-unsupported providers are never dressed up as
+ *   0%. Once cache was seen in the window, a later single miss still renders 0%.
+ *   ◆ keeps its own stricter rule above: it additionally needs the aggregate
+ *   itself to be computable (totalDenom > 0).
  * - toolResult / branch_summary / compaction usage counts towards aggregate only
  * - `resetBaseline` (number of entries at reset time) restricts the scan to entries
  *   appended after a /cache-guardian reset. If the entry list is now shorter than
  *   the baseline (trimmed / replaced session), returns null/null (n/a) as a safe
  *   fallback instead of computing the wrong window.
- * - returns { aggregate: null, latest: null } when entries are empty or contain no usage
+ * - returns { aggregate: null, latest: null } when entries are empty, contain no usage,
+ *   or when the window never showed a cache interaction (◆ and ◇ are n/a)
  */
 export function computeLiveHitRates(entries: any[], resetBaseline?: number | null): {
   aggregate: number | null;
@@ -219,10 +244,17 @@ export function computeLiveHitRates(entries: any[], resetBaseline?: number | nul
   }
   const start = typeof resetBaseline === "number" ? Math.max(0, resetBaseline) : 0;
   const scan = scanLiveHitRates(entries, start);
-  const aggregate = (scan.totalDenom > 0 && (scan.totalCacheRead > 0 || scan.totalCacheWrite > 0))
+  const seenCacheInteraction = scan.totalCacheRead > 0 || scan.totalCacheWrite > 0;
+  const aggregate = (scan.totalDenom > 0 && seenCacheInteraction)
     ? aggregateHit(scan.totalCacheRead, scan.totalDenom)
     : null;
-  return { aggregate, latest: scan.latest };
+  // ◆ and ◇ share the "was cache ever in play in this window?" precondition:
+  // when the window never showed a cache interaction (a model that does not
+  // report cache), both render n/a instead of a fabricated 0%. Once cache was
+  // seen, a later round without cache interaction itself shows 0% (◇) — the
+  // just-measured-round value — while ◆ keeps the aggregate above.
+  const latest = seenCacheInteraction ? scan.latest : null;
+  return { aggregate, latest };
 }
 
 /**
@@ -358,6 +390,8 @@ type InstanceState = {
   } | null;
   // TPS estimation: t0 of the last provider request (Date.now()), and the
   // formatted tokens/s of the last completed assistant turn (null -> footer n/a).
+  // t0 is consumed (set back to null) by the turn_end that estimates from it, so
+  // each turn's stamp is used exactly once; before_provider_request re-records it.
   providerRequestStartedAt: number | null;
   lastTurnTps: string | null;
   footerInstalled: boolean;
@@ -640,18 +674,22 @@ function recordTurnUsage(state: InstanceState, rawMessage: any): void {
 
 /**
  * Estimate TPS for the turn that just finished: the output tokens of the
- * assistant message over the elapsed time since the last before_provider_request
- * (t0) of this turn. Returns the formatted value, or null when the inputs are
- * not available / not meaningful (missing t0, no assistant usage, output not a
- * finite positive number, elapsed <= 0). The caller renders null as n/a.
+ * assistant message over the elapsed time since `t0` (the Date.now() stamped by
+ * this turn's last before_provider_request). `t0` is handed in by the caller,
+ * which also clears it, so a single turn_end can never consume the same stamp
+ * twice: a turn_end that is not preceded by a new before_provider_request
+ * arrives with t0 === null and returns null (n/a) instead of measuring a huge
+ * elapsed window and collapsing the tokens/s estimate.
+ * Returns the formatted value, or null when the inputs are not available / not
+ * meaningful (missing/consumed t0, no assistant usage, output not a finite
+ * positive number, elapsed <= 0). The caller renders null as n/a.
  */
-function computeTurnTps(state: InstanceState, rawMessage: any): string | null {
+function computeTurnTps(t0: number | null, rawMessage: any): string | null {
   if (!rawMessage || typeof rawMessage !== "object") return null;
   if (rawMessage.role !== "assistant" || !rawMessage.usage) return null;
-  const startedAt = state.providerRequestStartedAt;
-  if (typeof startedAt !== "number") return null;
+  if (typeof t0 !== "number") return null;
   const output = normalizeUsage(rawMessage.usage).output;
-  return formatTps(output, Date.now() - startedAt);
+  return formatTps(output, Date.now() - t0);
 }
 
 export function extractAndNormalizeUsage(
@@ -1754,7 +1792,8 @@ export default function (pi: ExtensionAPI) {
     if (!state.runtimeEnabled) return;
     // TPS t0: mark the start of this provider request. Tool loops fire this hook
     // once per request; the last one before turn_end wins, so the elapsed time
-    // matches the request whose assistant usage turn_end reports.
+    // matches the request whose assistant usage turn_end reports. turn_end
+    // consumes (clears) the stamp, so the next turn always re-records its own t0.
     state.providerRequestStartedAt = Date.now();
     try {
       if (state.prefixDiagEnabled) observePrefixDiagnostics(state, event.payload, ctx);
@@ -1845,10 +1884,14 @@ export default function (pi: ExtensionAPI) {
     if (event.message) {
       recordTurnUsage(state, event.message);
     }
-    // Estimate TPS from this turn's t0 and this assistant message's output tokens,
-    // then consume t0 so a following turn without its own provider request shows n/a.
-    state.lastTurnTps = computeTurnTps(state, event.message);
+    // TPS: take this turn's t0 and consume it exactly once — read it, drop it,
+    // then estimate. Without the drop, a second turn_end with no new
+    // before_provider_request in between would reuse the same t0, so elapsed
+    // would keep growing from that old stamp and t/s would collapse toward 0.
+    // The next turn's before_provider_request re-records a fresh t0.
+    const turnStartedAt = state.providerRequestStartedAt;
     state.providerRequestStartedAt = null;
+    state.lastTurnTps = computeTurnTps(turnStartedAt, event.message);
     readFooterCtx(state, ctx);
     refreshFooter(state, false);
   });

@@ -79,7 +79,7 @@ Pi Agent 的事件系统与扩展 API 已经可用。服务端缓存仍取决于
 
 在 TUI 模式下，footer 采用与 Pi 官方内置 footer 一致的「渲染时实时计算」方式，不再依赖事件快照：
 - **渲染时实时取数**：命中率在 `render()` 执行时动态遍历 `sessionManager.getEntries()` 实时汇总与提取最新轮次，上下文窗口占用直接调用 `getContextUsage()` 实时获取。
-- **命中率双显示**：命中率采用双菱形图标先累计、后实时的格式：`◆ <累计>% ◇ <实时>%`（例如 `◆ 87% ◇ 95%`）。其中 `◆` 累计项保持常规文本颜色，`◇` 实时最新一轮项使用 warning 警示色；没有任何缓存交互时（cacheRead=0 且 cacheWrite=0，例如不支持 prompt caching 的 provider）显示 `n/a`，**绝不伪造 0%**。`◇` 实时项永远是最新一条 assistant 响应：后续一轮若没有 `usage` 字段或无缓存交互，会显示 `n/a` 而不是残留上一轮数值。
+- **命中率双显示**：命中率采用双菱形图标先累计、后实时的格式：`◆ <累计>% ◇ <实时>%`（例如 `◆ 87% ◇ 95%`）。其中 `◆` 累计项保持常规文本颜色，`◇` 实时最新一轮项使用 warning 警示色。扫描窗口内从未出现缓存交互时（所有条目 cacheRead=0 且 cacheWrite=0，例如不支持 prompt caching 的 provider）**两项都显示 `n/a`**，绝不伪造 0%。而当窗口内曾出现缓存交互后，最新一轮本身没有缓存交互时显示 `◇ 0%`（该轮已被测量，只是没走缓存）；若最新一轮完全没有 `usage` 字段（中断/报错/注入消息），则显示 `n/a` 而不是残留上一轮数值。`◆` 累计口径不变，且另需分母可计算。
 - **上下文占用分色**：`▲` 上下文段仿官方阈值——`>90%` 用 error 色，`>70%` 用 warning 色，其余保持默认文本色；其它 footer 段颜色不受影响。
 - **最近一轮生成速度（`▸ t/s`）**：在 `▲` 上下文与 `■` 模型之间显示最近一次 provider 生成的估算速度，格式 `▸ <n> t/s`（例如 `▸ 45 t/s`）。算法为 `outputTokens / (elapsedMs / 1000)`，其中 `outputTokens` 取 `turn_end` 上报的 assistant `usage.output`，`elapsedMs` 为距最后一次 `before_provider_request`（t0；工具循环以最后一次请求为准）的墙钟耗时。无 t0、无 assistant `usage`、`output` 非有限正数、`elapsed <= 0` 或尚无完成轮次时显示 dim 的 `n/a`；`reset` / `session_start` 会清零，不跨会话残留。`after_provider_response` 只提供 status/headers（无 body/usage），因此该速度是请求级估算，不是流式 token 速率。
 - **刷新时机与节流**：高频事件（`turn_end`、`tool_execution_start`、`tool_execution_end`）触发 16ms TUI 渲染节流刷新，低频事件（`agent_end`、`model_select`、`thinking_level_select`、`/cache-guardian reset`）保持 force 强制重绘。
