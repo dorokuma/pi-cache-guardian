@@ -55,7 +55,9 @@ Per-turn `cacheRead` / `cacheWrite` / `input` is recorded while enabled. `/cache
 `/cache-guardian` prints **two scopes** so the numbers can never contradict the footer:
 
 - `Aggregate hit ... (current run; ...)` — this process since `session_start` (the `state.snapshot` window used for per-turn reports).
-- `Session aggregate ... (all session, footer scope; ...)` — the full session entries, the same algorithm the footer's `◆` cumulative rate uses (includes historical rounds after a resume).
+- `Session aggregate ... (all session, footer scope / post-reset window; ...)` — the full session entries (or the post-`/cache-guardian reset` window), the same algorithm the footer's `◆` cumulative rate uses. After `/cache-guardian reset`, the footer only counts entries appended after the reset, and the label reflects that.
+
+Per-turn detail shows the measured hit rate for each round. When the scanned session window never showed a cache interaction, Per-turn shows `n/a` (never a fabricated `0%`). Once cache was seen in the session, a round with `denom > 0` but no cache interaction shows `0%`. A round with no `usage` or zero denominator still shows `n/a`.
 
 String length in diagnostics is **character count**, not UTF-8 bytes. Dividing by 4 is a rough estimate, not an exact token count.
 

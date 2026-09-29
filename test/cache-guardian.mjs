@@ -1251,6 +1251,41 @@ function compactableSkillSet() {
   ok("Footer ◆ matches the command's Session aggregate; ◇ is 0% after a miss but n/a without any cache interaction");
 }
 
+// ── Per-turn 0% semantics: when session had cache interactions, a measured turn
+//    with cacheRead=0/cacheWrite=0 but denom>0 shows 0% (not n/a) ──
+{
+  const sessionEntries = [
+    // First entry: cache interaction -> sessionHadInteraction = true
+    { type: "message", message: { role: "assistant", usage: { input: 500, cacheRead: 500, cacheWrite: 0 } } },
+    // Second entry: no cache interaction but measurable -> this turn is 0%
+    { type: "message", message: { role: "assistant", usage: { input: 1000, cacheRead: 0, cacheWrite: 0 } } },
+  ];
+  const ctx = mockContext({
+    sessionManager: {
+      getSessionId: () => "test-session",
+      appendCustomEntry: () => {},
+      getEntries: () => sessionEntries,
+    },
+  });
+  const { ext } = await fresh(ctx);
+
+  // Simulate agent_end for a turn where liveRun is empty and fallback picks
+  // up the second session entry (input=1000, cacheRead=0, cacheWrite=0, denom=1000).
+  await fire(ext, "agent_start", ctx);
+  await fire(ext, "agent_end", ctx, {
+    messages: [{ role: "assistant", usage: { input: 1000, cacheRead: 0, cacheWrite: 0 } }],
+  });
+
+  ctx.notices.length = 0;
+  await ext.commands.get("cache-guardian").handler("", ctx);
+  const stats = ctx.notices.map((n) => n[0]).join("\n");
+  // Session aggregate: (500+0)/(500+500+1000+0) = 500/2000 = 25%
+  assert.match(stats, /Session aggregate: 25%/);
+  // Per-turn for turn 1: session had interaction, denom=1000>0, cacheRead=0 -> 0%
+  assert.match(stats, /T1: i=1000 r=0 w=0 0%/);
+  ok("Per-turn shows 0% (not n/a) when session had cache interactions and turn is measurable");
+}
+
 // ── Context occupancy danger colors (footer segment only) ──
 {
   let footerComponent = null;
@@ -1552,6 +1587,36 @@ function compactableSkillSet() {
   ok("Guard: both current run and all-session n/a -> silent");
 }
 
+// ── Session aggregate label reflects reset state: after /reset, footer is a
+//    post-reset window, so the label disclaims alignment with footer scope ──
+{
+  const sessionEntries = [
+    { type: "message", message: { role: "assistant", usage: { input: 100, cacheRead: 900, cacheWrite: 0 } } },
+  ];
+  const ctx = mockContext({
+    sessionManager: {
+      getSessionId: () => "test-session",
+      appendCustomEntry: () => {},
+      getEntries: () => sessionEntries,
+    },
+  });
+  const { ext } = await fresh(ctx);
+
+  // Before reset: footerResetBaseline is null -> label says "footer scope"
+  ctx.notices.length = 0;
+  await ext.commands.get("cache-guardian").handler("", ctx);
+  let stats = ctx.notices.map((n) => n[0]).join("\n");
+  assert.match(stats, /Session aggregate: 90%  \(all session, footer scope; read=900 \/ denom=1000\)/);
+
+  // After reset: footerResetBaseline is set -> label says footer is post-reset window
+  await ext.commands.get("cache-guardian").handler("reset", ctx);
+  ctx.notices.length = 0;
+  await ext.commands.get("cache-guardian").handler("", ctx);
+  stats = ctx.notices.map((n) => n[0]).join("\n");
+  assert.match(stats, /Session aggregate: 90%  \(all session, footer currently post-reset window; read=900 \/ denom=1000\)/);
+  ok("Session aggregate label switches to post-reset wording after /reset");
+}
+
 // ── Regression: (a) No double counting when turn_end followed by agent_end ──
 {
   const { ext, ctx } = await fresh();
@@ -1804,14 +1869,48 @@ function compactableSkillSet() {
     hitPct: 75,
   });
 
-  // 2. snapshot was NOT written by fallback (avoids double counting)
+  // 2. fallback accumulates to snapshot so current-run aggregate and
+  //    session_shutdown guard can read this turn's data (Low-2 fix).
   ctx.notices.length = 0;
   await ext.commands.get("cache-guardian").handler("", ctx);
   const stats = ctx.notices.map((n) => n[0]).join("\n");
   assert.match(stats, /Turns: 1/);
-  assert.match(stats, /Cumulative: input=0  output=0  cacheRead=0  cacheWrite=0/);
+  assert.match(stats, /Cumulative: input=120  output=0  cacheRead=360  cacheWrite=0/);
+  assert.match(stats, /Aggregate hit: 75%  \(current run; read=360 \/ denom=480\)/);
 
-  ok("Regression: agent_end fallback calculates turnReports/customEntry without writing to state.snapshot");
+  ok("Regression: agent_end fallback accumulates to snapshot for current-run aggregate and guard");
+}
+
+// ── Regression (Low-2): session_shutdown guard can read fallback-accumulated
+//    data when liveRun was empty and only event.messages provided the usage ──
+{
+  process.env.PI_CACHE_GUARD = "1";
+  // No session entries: all-session aggregate is n/a
+  const ctx = mockContext({
+    sessionManager: {
+      getSessionId: () => "test-session",
+      appendCustomEntry: () => {},
+      getEntries: () => [],
+    },
+  });
+  const { ext } = await fresh(ctx);
+
+  // Only agent_end fires (no turn_end), liveRun is empty, fallback extracts
+  // usage from event.messages: input=100, cacheRead=100, cacheWrite=0, denom=200
+  await fire(ext, "agent_start", ctx);
+  await fire(ext, "agent_end", ctx, {
+    messages: [{ role: "assistant", usage: { input: 100, cacheRead: 100, cacheWrite: 0 } }],
+  });
+
+  ctx.notices.length = 0;
+  await fire(ext, "session_shutdown", ctx);
+  const warns = ctx.notices.filter((n) => String(n[0]).includes("Cache guard"));
+  // current-run aggregate = 100/(100+100) = 50%, below default threshold 90% -> must warn
+  assert.equal(warns.length, 1, "guard must warn when fallback data is accumulated to snapshot");
+  const msg = String(warns[0][0]);
+  assert.match(msg, /current run hit=50%/);
+  delete process.env.PI_CACHE_GUARD;
+  ok("Regression: session_shutdown guard warns on fallback-accumulated current-run data");
 }
 
 // ── Regression: liveRun has cacheRead with input=0 (100% cache hit) does NOT trigger agent_end fallback ──

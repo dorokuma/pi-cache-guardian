@@ -1859,6 +1859,15 @@ export default function (pi: ExtensionAPI) {
       cr = fallback.cacheRead;
       cw = fallback.cacheWrite;
       denom = cacheHitDenom({ input: inp, cacheRead: cr, cacheWrite: cw });
+      // Fallback accumulates to snapshot so current-run aggregate and
+      // session_shutdown guard can read this turn's data.
+      state.snapshot.totalInput += inp;
+      state.snapshot.totalOutput += outp;
+      state.snapshot.totalCacheWrite += cw;
+      if (denom > 0) {
+        state.snapshot.totalCacheRead += cr;
+        state.snapshot.totalHitDenom += denom;
+      }
     }
     const hitPct = aggregateHit(cr, denom);
     state.turnReports.push({ turn: state.snapshot.turns, input: inp, output: outp, cacheRead: cr, cacheWrite: cw, denom, hitPct });
@@ -2060,7 +2069,7 @@ function showStats(
     `State: ${state.runtimeEnabled ? "enabled" : "disabled"}`,
     `Turns: ${snap.turns}`,
     `Aggregate hit: ${agg !== null ? agg + "%" : "n/a"}  (current run; read=${snap.totalCacheRead} / denom=${snap.totalHitDenom})`,
-    `Session aggregate: ${session.aggregate !== null ? session.aggregate + "%" : "n/a"}  (all session, footer scope; read=${session.read} / denom=${session.denom})`,
+    `Session aggregate: ${session.aggregate !== null ? session.aggregate + "%" : "n/a"}  (${state.footerResetBaseline !== null ? "all session, footer currently post-reset window; " : "all session, footer scope; "}read=${session.read} / denom=${session.denom})`,
     `Cumulative: input=${snap.totalInput}  output=${snap.totalOutput}  cacheRead=${snap.totalCacheRead}  cacheWrite=${snap.totalCacheWrite}`,
     `First-turn prompt: ${firstInfo}`,
     `Skill compact: ${skillCompact ? "on (lossless, recognized templates)" : "off"}`,
@@ -2074,8 +2083,13 @@ function showStats(
   }
   if (reports.length > 0) {
     lines.push("", `Per-turn (last ${reports.length}, bounded):`);
+    // session.aggregate !== null means the session scan found cache interaction
+    // (totalDenom > 0 && (totalCacheRead > 0 || totalCacheWrite > 0)).
+    const sessionHadInteraction = session.aggregate !== null;
     for (const r of reports) {
-      const turnHit = (r.cacheRead === 0 && r.cacheWrite === 0) ? "n/a" : (r.hitPct !== null ? r.hitPct + "%" : "n/a");
+      const turnHit = (sessionHadInteraction && r.denom > 0)
+        ? (r.hitPct !== null ? r.hitPct + "%" : "n/a")
+        : "n/a";
       lines.push(`  T${r.turn}: i=${r.input} r=${r.cacheRead} w=${r.cacheWrite} ${turnHit}`);
     }
   }

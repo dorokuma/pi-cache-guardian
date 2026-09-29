@@ -55,7 +55,9 @@ Pi Agent 的事件系统与扩展 API 已经可用。服务端缓存仍取决于
 `/cache-guardian` 同时打印**两个口径**，避免与 footer 数字打架：
 
 - `Aggregate hit ... (current run; ...)` — 本进程自 `session_start` 以来的区间（`state.snapshot` 口径，逐轮报告用它）。
-- `Session aggregate ... (all session, footer scope; ...)` — 完整会话条目，与 footer `◆` 累计项同一算法（resume 后包含历史轮次）。
+- `Session aggregate ... (all session, footer scope / post-reset window; ...)` — 完整会话条目（或 `/cache-guardian reset` 之后的窗口），与 footer `◆` 累计项同一算法。reset 后 footer 只统计 reset 后追加的条目，标签会注明这一点。
+
+逐轮明细显示每轮的实测命中率。若扫描的会话窗口从未出现缓存交互，Per-turn 显示 `n/a`（绝不伪造 0%）。一旦会话中曾出现缓存交互，`denom > 0` 但无缓存交互的轮次显示 `0%`。无 `usage` 或分母为零的轮次仍显示 `n/a`。
 
 诊断里的字符串长度是**字符数**，不是 UTF-8 字节；除以 4 只是粗估，不是精确 token。
 
