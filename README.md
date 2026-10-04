@@ -102,8 +102,11 @@ Pi auto-installs and loads it. No settings changes required.
 
 ```bash
 git clone https://github.com/dorokuma/pi-cache-guardian.git
-cp pi-cache-guardian/extensions/cache-guardian.ts ~/.pi/agent/extensions/
+cd pi-cache-guardian
+bash integrations/pi/install.sh   # or: pnpm sync
 ```
+
+`install.sh` is idempotent: when the deployed copy already matches the repo source (md5), it reports `unchanged` and does not rewrite the target (mtime untouched). It fails loudly instead of silently: a missing `md5sum`, an unset `HOME` (only when `PI_EXT_DEST` is not given), or a non-absolute / directory destination all print `install.sh FAILED: ...` to stderr and exit non-zero. Override the destination with `PI_EXT_DEST=/abs/path/to/cache-guardian.ts`. Pi loads extensions at session start — run `/reload` or start a new session afterwards. This script only syncs the repo source into the local extension directory; the npm route above (`pi install npm:pi-cache-guardian`) installs the published package and does not go through this script.
 
 ### Environment variables
 
