@@ -102,8 +102,11 @@ Pi 自动安装并加载，无需设置变更。
 
 ```bash
 git clone https://github.com/dorokuma/pi-cache-guardian.git
-cp pi-cache-guardian/extensions/cache-guardian.ts ~/.pi/agent/extensions/
+cd pi-cache-guardian
+bash integrations/pi/install.sh   # 或：pnpm sync
 ```
+
+`install.sh` 幂等：部署副本与仓库源 md5 一致时报告 `unchanged`，不重写目标（mtime 不变）。失败显式而非静默：`md5sum` 缺失、`HOME` 未设置（仅在未指定 `PI_EXT_DEST` 时校验）、目标非绝对路径或为目录，均向 stderr 打印 `install.sh FAILED: ...` 并非零退出。目标可用 `PI_EXT_DEST=/abs/path/to/cache-guardian.ts` 覆盖。pi 仅在会话启动时加载扩展——之后需 `/reload` 或新会话生效。本脚本只覆盖「仓库源文件 → 本机扩展目录」这条链路；上方的 `pi install npm:pi-cache-guardian` 装的是 npm 发布版，不经此脚本。
 
 ### 环境变量
 
