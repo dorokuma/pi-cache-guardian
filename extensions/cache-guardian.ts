@@ -534,30 +534,39 @@ export function formatHerdsmanStatus(s: string | undefined): string | null {
 }
 
 /**
- * Format context window size to compact string:
- * - Divisible by 1,048,576 (2^20) -> N + "M" (e.g. 1048576 -> 1M, 2097152 -> 2M)
- * - Divisible by 1,000,000 (10^6) -> N + "M" (e.g. 1000000 -> 1M)
- * - Divisible by 1,000 (10^3) -> N + "K" (e.g. 500000 -> 500K, 128000 -> 128K)
- * - Divisible by 1,024 (2^10) -> N + "K" (e.g. 524288 -> 512K, 131072 -> 128K)
- * - Otherwise raw number string (e.g. 999 -> 999)
+ * Format a context window size to a compact decimal-abbreviated string:
+ * - non-number / non-finite / <= 0 -> raw String(size) (0 -> "0", -1000 -> "-1000")
+ * - size < 1,000 -> raw number string (999 -> "999")
+ * - 1,000 <= size < 1,000,000 -> decimal K rounded to the nearest integer
+ *   (163072 -> "163K", 128000 -> "128K", 65536 -> "66K"); a rounded value of
+ *   1000 carries to "1M" (999999 -> "1M", never "1000K")
+ * - size >= 1,000,000 -> decimal M:
+ *   - size >= 10,000,000 -> rounded to whole M (10485760 -> "10M")
+ *   - otherwise -> rounded to the nearest tenth, with a trailing ".0" dropped
+ *     (1048576 -> "1M", 1500000 -> "1.5M", 1900000 -> "1.9M", 2000000 -> "2M",
+ *     2097152 -> "2.1M", 9999999 -> "10M")
+ * No binary (1024 / 1048576) divisibility shortcuts are used.
  */
 export function formatWindowSize(size: number): string {
   if (typeof size !== "number" || !Number.isFinite(size) || size <= 0) {
     return String(size);
   }
-  if (size % 1_048_576 === 0) {
-    return `${size / 1_048_576}M`;
+  if (size < 1_000) {
+    return String(size);
   }
-  if (size % 1_000_000 === 0) {
-    return `${size / 1_000_000}M`;
+  if (size < 1_000_000) {
+    const k = Math.round(size / 1_000);
+    return k >= 1_000 ? "1M" : `${k}K`;
   }
-  if (size % 1_000 === 0) {
-    return `${size / 1_000}K`;
+  const m = size / 1_000_000;
+  if (m >= 10) {
+    return `${Math.round(m)}M`;
   }
-  if (size % 1_024 === 0) {
-    return `${size / 1_024}K`;
-  }
-  return String(size);
+  // At most one decimal digit: round at integer-tenth granularity (not
+  // Math.floor(m * 10) / 10) so binary float drift cannot drop a value a full
+  // tenth (1900000 -> "1.9M", not "1.8M"); a trailing ".0" vanishes on its own
+  // because 10 / 10 stringifies as "1" (1048576 -> "1M").
+  return `${Math.round(size / 100_000) / 10}M`;
 }
 
 /**
