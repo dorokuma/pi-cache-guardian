@@ -107,26 +107,29 @@ import { truncateFooter, formatHerdsmanStatus, formatWindowSize } from "../exten
 
 {
   // 7a. formatWindowSize tests
-  // Binary powers
+  // Binary powers, expressed in decimal abbreviation
   assert.equal(formatWindowSize(1048576), "1M");
-  assert.equal(formatWindowSize(2097152), "2M");
-  assert.equal(formatWindowSize(524288), "512K");
-  assert.equal(formatWindowSize(131072), "128K");
-  assert.equal(formatWindowSize(65536), "64K");
+  assert.equal(formatWindowSize(2097152), "2.1M");
+  assert.equal(formatWindowSize(524288), "524K");
+  assert.equal(formatWindowSize(131072), "131K");
+  assert.equal(formatWindowSize(65536), "66K");
 
   // Decimal powers / multiples
   assert.equal(formatWindowSize(1000000), "1M");
   assert.equal(formatWindowSize(2000000), "2M");
   assert.equal(formatWindowSize(500000), "500K");
   assert.equal(formatWindowSize(128000), "128K");
-  assert.equal(formatWindowSize(1500000), "1500K");
+  assert.equal(formatWindowSize(1500000), "1.5M");
   assert.equal(formatWindowSize(1000), "1K");
+  assert.equal(formatWindowSize(163072), "163K");
+  assert.equal(formatWindowSize(10485760), "10M");
+  assert.equal(formatWindowSize(9999999), "10M");
 
   // Non-divisible boundaries & edge cases
-  assert.equal(formatWindowSize(1000001), "1000001");
-  assert.equal(formatWindowSize(999999), "999999");
+  assert.equal(formatWindowSize(1000001), "1M");
+  assert.equal(formatWindowSize(999999), "1M");
   assert.equal(formatWindowSize(999), "999");
-  assert.equal(formatWindowSize(1001), "1001");
+  assert.equal(formatWindowSize(1001), "1K");
   assert.equal(formatWindowSize(0), "0");
   assert.equal(formatWindowSize(-1000), "-1000");
 

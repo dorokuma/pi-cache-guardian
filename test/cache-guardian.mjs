@@ -889,7 +889,7 @@ function compactableSkillSet() {
   assert.equal(renderCount, 1, "turn_end must trigger footer render");
   const renderedTurn = footerComponent.render(120)[0];
   assert.match(renderedTurn, /◆ 75%/); // 300 / 400 = 75%
-  assert.match(renderedTurn, /▲ 20%\/128K/);
+  assert.match(renderedTurn, /▲ 20%\/131K/);
 
   // 2. tool_execution_start updates context usage and requests render
   renderCount = 0;
@@ -901,7 +901,7 @@ function compactableSkillSet() {
   });
   assert.equal(renderCount, 1, "tool_execution_start must trigger footer render");
   const renderedToolStart = footerComponent.render(120)[0];
-  assert.match(renderedToolStart, /▲ 50%\/128K/);
+  assert.match(renderedToolStart, /▲ 50%\/131K/);
 
   // 3. tool_execution_end updates context usage and requests render
   renderCount = 0;
@@ -914,7 +914,7 @@ function compactableSkillSet() {
   });
   assert.equal(renderCount, 1, "tool_execution_end must trigger footer render");
   const renderedToolEnd = footerComponent.render(120)[0];
-  assert.match(renderedToolEnd, /▲ 60%\/128K/);
+  assert.match(renderedToolEnd, /▲ 60%\/131K/);
 
   // 4. disabled state ignores turn_end and tool execution events
   await ext.commands.get("cache-guardian").handler("disable", ctx);
